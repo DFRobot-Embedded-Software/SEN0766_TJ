@@ -1,0 +1,57 @@
+menu "STCC4 环境传感器 (DFRobot Gravity)"
+
+    config STCC4_I2C_SDA
+        int "I2C SDA GPIO"
+        default 7
+        help
+            STCC4 模块 SDA 引脚。ESP32-P4-Function-EV-Board 默认为 GPIO7。
+
+    config STCC4_I2C_SCL
+        int "I2C SCL GPIO"
+        default 8
+        help
+            STCC4 模块 SCL 引脚。ESP32-P4-Function-EV-Board 默认为 GPIO8。
+
+    config STCC4_I2C_ADDR
+        hex "I2C 地址 (7-bit)"
+        default 0x64
+        help
+            DFRobot STCC4 默认 0x64，跳线可改为 0x65。
+
+    config STCC4_POLL_INTERVAL_MS
+        int "采样间隔 (ms)"
+        default 1000
+        range 500 60000
+        help
+            STCC4 后台 I2C 采样间隔。Web 页面默认 1 秒刷新，建议与此一致。
+
+endmenu
+
+menu "C4004 毫米波雷达 (DFRobot UART)"
+
+    config C4004_UART_PORT
+        int "UART 端口号"
+        default 1
+        range 0 2
+        help
+            ESP32-P4 UART 端口，默认 UART1。
+
+    config C4004_UART_TX
+        int "TX GPIO (接 C4004 RX)"
+        default 50
+        help
+            ESP32 发送引脚，连接 C4004 模块 RX。
+
+    config C4004_UART_RX
+        int "RX GPIO (接 C4004 TX)"
+        default 51
+        help
+            ESP32 接收引脚，连接 C4004 模块 TX。
+
+    config C4004_UART_BAUD
+        int "波特率"
+        default 115200
+        help
+            C4004 默认 115200。
+
+endmenu

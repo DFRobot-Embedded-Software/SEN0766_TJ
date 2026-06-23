@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<title>设备监控与配置系统</title>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta name="robots" content="index,follow">
+<meta name="generator" content="GrapesJS Studio">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body class="gjs-t-body font-body dashboard-page">
+<div class="page-background">
+  <div class="page-container">
+    <header class="gjs-t-border header">
+    <div class="header-content">
+      <div class="header-text-block">
+        <div class="header-badge">
+          <img src="/icons/monitor-cog.svg" alt="系统图标" class="badge-icon"/>
+          <span>设备状态总览 · 实时联动控制</span>
+        </div>
+        <div class="header-titles">
+          <h1 class="gjs-t-h1 font-heading main-heading">设备监控与配置系统</h1>
+          <p class="header-subtitle">实时监控设备环境与人员动态，快速完成区域命名与网络连接配置，适用于门店、展厅、办公区与智慧空间部署场景。</p>
+        </div>
+      </div>
+      <div class="header-stats">
+        <div class="gjs-t-border stat-card">
+          <div class="stat-header">
+            <div class="stat-icon-wrap">
+              <img src="/icons/activity.svg" alt="在线图标" class="stat-icon"/>
+            </div>
+            <div class="stat-labels">
+              <span class="stat-label">设备状态</span>
+              <strong class="stat-value">在线运行</strong>
+            </div>
+          </div>
+          <p class="stat-description">持续接收环境与区域数据，支持即时配置下发。</p>
+        </div>
+        <div class="gjs-t-border stat-card">
+          <div class="stat-header">
+            <div class="stat-icon-wrap">
+              <img src="/icons/wifi.svg" alt="网络图标" class="stat-icon"/>
+            </div>
+            <div class="stat-labels">
+              <span class="stat-label">当前连接</span>
+              <strong id="connStatus" class="stat-value">待配置</strong>
+            </div>
+          </div>
+          <p id="connDesc" class="stat-description">完成 WiFi 保存后，设备将尝试建立网络接入。</p>
+        </div>
+      </div>
+    </div>
+  </header>
+  <div class="main-content">
+    <nav class="gjs-t-border tabs">
+      <div class="tabs-list">
+        <button type="button" data-panel="dataPanel" data-icon="dashboard" class="tab-button tab-active">
+        <img src="/icons/dashboard-active.svg" alt="设备数据图标" class="tab-icon"/>
+        <span>设备数据</span>
+      </button>
+      <button type="button" data-panel="configPanel" data-icon="map" id="areaConfigTab" class="tab-button tab-hidden">
+      <img src="/icons/map-pinned.svg" alt="区域配置图标" class="tab-icon"/>
+      <span>区域配置</span>
+    </button>
+    <button type="button" data-panel="wifiPanel" data-icon="wifi" class="tab-button">
+    <img src="/icons/router.svg" alt="WiFi配置图标" class="tab-icon"/>
+    <span>WiFi 配置</span>
+  </button>
+</div>
+</nav>
+<section id="dataPanel" data-panel="0">
+  <div class="data-grid">
+    <article class="gjs-t-border environment-panel">
+      <div class="panel-header">
+        <div class="panel-title-group">
+          <div class="panel-icon-wrap">
+            <img src="/icons/thermometer-sun.svg" alt="环境监测图标" class="panel-icon"/>
+          </div>
+          <div class="panel-title-text">
+            <h2 class="gjs-t-h2 font-heading panel-title">环境监测数据</h2>
+            <p class="panel-subtitle">展示当前设备采集到的温湿度与 CO2 指标。</p>
+          </div>
+        </div>
+      </div>
+      <div class="metric-grid">
+        <div class="gjs-t-border metric-card">
+          <div class="metric-header">
+            <div class="metric-label-group">
+              <div class="metric-icon-wrap">
+                <img src="/icons/thermometer.svg" alt="温湿度图标" class="metric-icon"/>
+              </div>
+              <div class="metric-label-text">
+                <span class="metric-label">温湿度</span>
+                <span class="metric-meta">温度 / 湿度组合值</span>
+              </div>
+            </div>
+            <span class="metric-tag">ENV</span>
+          </div>
+          <div id="temp" class="metric-value">--</div>
+        </div>
+        <div class="gjs-t-border metric-card">
+          <div class="metric-header">
+            <div class="metric-label-group">
+              <div class="metric-icon-wrap">
+                <img src="/icons/leaf.svg" alt="CO2图标" class="metric-icon"/>
+              </div>
+              <div class="metric-label-text">
+                <span class="metric-label">CO2 浓度</span>
+                <span class="metric-meta">空气质量参考指标</span>
+              </div>
+            </div>
+            <span class="metric-tag">AIR</span>
+          </div>
+          <div id="co2" class="metric-value">--</div>
+        </div>
+      </div>
+    </article>
+    <article id="activityPanel" class="gjs-t-border activity-panel panel-hidden">
+      <div class="panel-header">
+        <div class="panel-icon-wrap">
+          <img src="/icons/users-round.svg" alt="人员活动图标" class="panel-icon"/>
+        </div>
+        <div class="panel-title-text">
+          <h2 class="gjs-t-h2 font-heading panel-title">人员活动状态</h2>
+          <p class="panel-subtitle">按区域查看活动人数与静止人数，便于空间状态判断。</p>
+        </div>
+      </div>
+      <div id="areaList" class="area-list"></div>
+    </article>
+    <article id="areaSetupPrompt" class="gjs-t-border area-setup-card panel-hidden">
+      <div class="area-setup-content">
+        <img src="/icons/map-pinned.svg" alt="区域配置" class="area-setup-icon"/>
+        <div>
+          <h3 class="area-setup-title">C4004 区域监测</h3>
+          <p class="area-setup-desc">启用后可配置区域标签，并在本页查看各区域人员活动数据。</p>
+        </div>
+        <button type="button" id="enableAreaBtn" class="primary-button">启用区域配置</button>
+      </div>
+    </article>
+  </div>
+</section>
+<section id="configPanel" data-panel="1" class="panel-hidden">
+  <div class="area-config-page">
+    <div class="gjs-t-border area-config-card">
+      <div class="area-config-header">
+        <div class="area-config-title-row">
+          <img src="/icons/map-pinned.svg" alt="" class="area-config-title-icon"/>
+          <h2 class="area-config-title">C4004区域标签管理</h2>
+        </div>
+        <button type="button" id="addTagBtn" class="primary-button add-tag-btn">
+          <span class="add-tag-plus">+</span>
+          <span>添加区域标签</span>
+        </button>
+      </div>
+      <div id="tagEmptyState" class="tag-empty-state">
+        <div class="tag-empty-icon">📁</div>
+        <p>暂无区域标签，点击上方按钮添加</p>
+      </div>
+      <div id="tagList" class="tag-list"></div>
+    </div>
+  </div>
+</section>
+<div id="tagModal" class="modal-overlay panel-hidden" aria-hidden="true">
+  <div class="modal-card" role="dialog" aria-labelledby="tagModalTitle">
+    <div class="modal-header">
+      <h3 id="tagModalTitle" class="modal-title">添加C4004区域标签</h3>
+      <button type="button" id="closeTagModal" class="modal-close" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-field">
+        <label for="tagStrategy" class="form-label">标签策略</label>
+        <select id="tagStrategy" class="gjs-t-border select-input">
+          <option value="1">统计</option>
+          <option value="2">边缘门</option>
+          <option value="3">靠近远离</option>
+        </select>
+        <p id="tagStrategyDesc" class="field-hint"></p>
+      </div>
+      <div class="form-field">
+        <label for="tagName" class="form-label">标签名字</label>
+        <input type="text" id="tagName" placeholder="请输入标签名字" class="gjs-t-border text-input"/>
+      </div>
+      <div class="form-field">
+        <span class="form-label">坐标获取</span>
+        <div class="coord-grid">
+          <button type="button" class="coord-btn" data-point="1">◎ 获取坐标1</button>
+          <button type="button" class="coord-btn" data-point="2">◎ 获取坐标2</button>
+          <button type="button" class="coord-btn" data-point="3">◎ 获取坐标3</button>
+          <button type="button" class="coord-btn" data-point="4">◎ 获取坐标4</button>
+        </div>
+        <p id="coordSummary" class="coord-summary">尚未获取坐标</p>
+        <p class="field-hint">站在区域角点处，依次点击 4 个按钮从 C4004 读取坐标；系统将自动计算矩形区域并下发雷达。</p>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" id="confirmAddTag" class="primary-button modal-confirm">确认添加</button>
+      <button type="button" id="cancelAddTag" class="secondary-button modal-cancel">取消</button>
+    </div>
+  </div>
+</div>
+<section id="wifiPanel" data-panel="2" class="panel-hidden">
+  <div class="wifi-grid">
+    <div class="gjs-t-border wifi-form-card">
+      <div class="wifi-header">
+        <div class="wifi-icon-wrap">
+          <img src="/icons/wifi.svg" alt="WiFi图标" class="wifi-icon"/>
+        </div>
+        <div class="wifi-heading">
+          <h2 class="gjs-t-h2 font-heading wifi-title">WiFi 配置</h2>
+          <p id="wifiDesc" class="wifi-description">填写要接入的路由器 WiFi 信息，保存后设备将尝试连接。</p>
+        </div>
+      </div>
+      <form method="get" id="wifiForm" class="wifi-form">
+        <div class="form-field">
+          <label for="ssid" class="form-label">WiFi 名称 (SSID)</label>
+          <input type="text" id="ssid" required placeholder="请输入 WiFi 名称" class="gjs-t-border text-input"/>
+        </div>
+        <div class="form-field">
+          <label for="password" class="form-label">WiFi 密码</label>
+          <input type="password" id="password" placeholder="无密码可留空" class="gjs-t-border password-input"/>
+        </div>
+        <div class="submit-row">
+          <button type="submit" id="submitBtn" class="primary-button">
+          <img src="/icons/plug-zap.svg" alt="连接图标" class="button-icon"/>
+          <span>保存并连接</span>
+        </button>
+        <div id="msg" class="message-box">
+        </div>
+      </div>
+    </form>
+    <div id="reprovisionBlock" class="reprovision-block panel-hidden">
+      <p class="field-hint">更换网络环境时，可手动开启配网热点；或断电重启后约 10 秒内找不到原 WiFi 时也会自动开启。</p>
+      <button type="button" id="reprovisionBtn" class="secondary-button reprovision-btn">重新配网（开启热点）</button>
+    </div>
+  </div>
+  <aside class="gjs-t-border wifi-info-card">
+    <div class="info-content">
+      <div class="info-panel">
+        <div class="info-header">
+          <img src="/icons/shield-check.svg" alt="安全图标" class="info-icon"/>
+          <strong class="info-title">连接说明</strong>
+        </div>
+        <p class="info-text">请确认输入的 SSID 与密码正确无误。若网络未设置密码，可将密码字段留空后直接保存。</p>
+      </div>
+      <div class="tip-list">
+        <div class="tip-item">
+          <div class="tip-title">建议使用稳定网络</div>
+          <p class="tip-text">优先连接信号覆盖良好、带宽稳定的 2.4G/兼容网络，减少离线风险。</p>
+        </div>
+        <div class="tip-item">
+          <div class="tip-title">连接过程需要短暂时间</div>
+          <p class="tip-text">保存后设备会尝试建立连接，期间状态可能短暂刷新，请耐心等待。</p>
+        </div>
+        <div class="tip-item">
+          <div class="tip-title">换新环境如何配网</div>
+          <p class="tip-text">设备找不到已保存的 WiFi 时，约 10 秒后自动开启热点 <b>MCP-Sensors-Setup</b>，连接后访问 http://192.168.4.1 即可更换网络。</p>
+        </div>
+        <p id="wifiTip" class="tip-footer">如连接失败，请检查路由器名称、密码、加密方式及信号覆盖情况。</p>
+      </div>
+    </div>
+  </aside>
+</div>
+</section>
+</div>
+</div>
+</div>
+<script src="/js/dashboard.js"></script>
+</body>
+</html>
