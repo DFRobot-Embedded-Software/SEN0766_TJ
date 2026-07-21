@@ -81,3 +81,7 @@ esp_err_t area_config_get(area_config_t *out);
 esp_err_t area_config_set_enabled(bool enabled);
 esp_err_t area_config_add_tag(const area_tag_t *tag);
 esp_err_t area_config_remove_tag(uint8_t index);
+
+/** 区域配置变更回调（增删标签、开关雷达区域后触发） */
+typedef void (*area_config_changed_cb_t)(void);
+void area_config_set_change_callback(area_config_changed_cb_t cb);

@@ -117,6 +117,11 @@ static esp_err_t static_file_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    if (strncmp(uri, "/mcp", 4) == 0) {
+        httpd_resp_send_404(req);
+        return ESP_FAIL;
+    }
+
     if (s_provision_mode && captive_portal_is_probe_uri(uri)) {
         return captive_portal_redirect(req);
     }
@@ -502,7 +507,8 @@ static esp_err_t start_server(const char *index_page, bool provision_mode)
     s_provision_mode = provision_mode;
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 32;
+    config.stack_size = 8192;
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.lru_purge_enable = true;
 
@@ -514,20 +520,45 @@ static esp_err_t start_server(const char *index_page, bool provision_mode)
 
     register_api_handlers();
 
+    if (provision_mode) {
+        err = web_server_register_static_routes();
+        if (err != ESP_OK) {
+            return err;
+        }
+        httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, captive_redirect_handler);
+        ESP_LOGI(TAG, "provision server: http://192.168.4.1");
+    } else {
+        ESP_LOGI(TAG, "dashboard httpd ready (register MCP before static routes)");
+    }
+
+    return ESP_OK;
+}
+
+httpd_handle_t web_server_get_handle(void)
+{
+    return s_server;
+}
+
+esp_err_t web_server_register_static_routes(void)
+{
+    if (!s_server) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
     httpd_uri_t static_files = {
         .uri = "/*",
         .method = HTTP_GET,
         .handler = static_file_handler,
     };
-    httpd_register_uri_handler(s_server, &static_files);
-
-    if (provision_mode) {
-        httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, captive_redirect_handler);
-        ESP_LOGI(TAG, "provision server: http://192.168.4.1");
-    } else {
-        ESP_LOGI(TAG, "dashboard server started");
+    esp_err_t err = httpd_register_uri_handler(s_server, &static_files);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "static route register failed: %s", esp_err_to_name(err));
+        return err;
     }
 
+    if (!s_provision_mode) {
+        ESP_LOGI(TAG, "dashboard server started");
+    }
     return ESP_OK;
 }
 

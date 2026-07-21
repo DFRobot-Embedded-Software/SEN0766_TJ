@@ -91,6 +91,22 @@ static TickType_t s_leave_hold_until[AREA_TAG_MAX];
 static TickType_t s_enter_hold_until[AREA_TAG_MAX];
 static TickType_t s_exit_hold_until[AREA_TAG_MAX];
 
+static TickType_t s_last_target_refresh;
+static TickType_t s_last_periodic_recover;
+static TickType_t s_last_ghost_recover;
+static TaskHandle_t s_health_task;
+static uint8_t s_ghost_mismatch_streak;
+
+#ifndef CONFIG_C4004_AUTO_RECOVER_ENABLE
+#define CONFIG_C4004_AUTO_RECOVER_ENABLE 1
+#endif
+#ifndef CONFIG_C4004_AUTO_RECOVER_INTERVAL_MS
+#define CONFIG_C4004_AUTO_RECOVER_INTERVAL_MS 21600000
+#endif
+#ifndef CONFIG_C4004_GHOST_RECOVER_COOLDOWN_MS
+#define CONFIG_C4004_GHOST_RECOVER_COOLDOWN_MS 60000
+#endif
+
 /** UART 请求共用缓冲区，避免 sync/query 在 main 任务栈上分配 ~1.2KB */
 static c4004_packet_t s_work_packet;
 static uint8_t s_tx_payload[C4004_MAX_PAYLOAD];
@@ -328,19 +344,45 @@ static void parse_targets(const uint8_t *data, uint16_t len)
     if (count > C4004_MAX_TARGETS) {
         count = C4004_MAX_TARGETS;
     }
-    s_target_count = count;
 
+    c4004_target_t parsed[C4004_MAX_TARGETS];
     for (uint8_t i = 0; i < count; i++) {
         uint16_t off = (uint16_t)(i * C4004_TARGET_RECORD_LEN);
-        s_targets[i].index = data[off];
-        s_targets[i].kinesia = data[off + 1];
-        s_targets[i].x = read_sign_i16(&data[off + 3]);
-        s_targets[i].y = read_sign_i16(&data[off + 5]);
-        s_targets[i].speed = read_sign_i16(&data[off + 9]);
+        parsed[i].index = data[off];
+        parsed[i].kinesia = data[off + 1];
+        parsed[i].x = read_sign_i16(&data[off + 3]);
+        parsed[i].y = read_sign_i16(&data[off + 5]);
+        parsed[i].speed = read_sign_i16(&data[off + 9]);
     }
 
-    ESP_LOGD(TAG, "targets updated: count=%u", count);
+    /* 同一 index 或距离过近的目标合并，避免 1 人显示为 2 人 */
+    uint8_t out = 0;
     for (uint8_t i = 0; i < count; i++) {
+        bool merged = false;
+        for (uint8_t j = 0; j < out; j++) {
+            if (parsed[i].index == s_targets[j].index) {
+                s_targets[j] = parsed[i];
+                merged = true;
+                break;
+            }
+            int32_t dx = (int32_t)parsed[i].x - (int32_t)s_targets[j].x;
+            int32_t dy = (int32_t)parsed[i].y - (int32_t)s_targets[j].y;
+            if ((dx * dx + dy * dy) < (35 * 35)) {
+                if (parsed[i].kinesia == 0x02 && s_targets[j].kinesia != 0x02) {
+                    s_targets[j] = parsed[i];
+                }
+                merged = true;
+                break;
+            }
+        }
+        if (!merged && out < C4004_MAX_TARGETS) {
+            s_targets[out++] = parsed[i];
+        }
+    }
+    s_target_count = out;
+
+    ESP_LOGD(TAG, "targets updated: raw=%u deduped=%u", count, out);
+    for (uint8_t i = 0; i < out; i++) {
         ESP_LOGD(TAG, "  target[%u] idx=%u kin=0x%02X x=%d y=%d spd=%d cm",
                  i, s_targets[i].index, s_targets[i].kinesia,
                  (int)s_targets[i].x, (int)s_targets[i].y, (int)s_targets[i].speed);
@@ -798,6 +840,144 @@ static void c4004_poll_task(void *arg)
     }
 }
 
+static void reset_local_state(void)
+{
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    memset(s_tag_states, 0, sizeof(s_tag_states));
+    memset(s_approach_hold_until, 0, sizeof(s_approach_hold_until));
+    memset(s_leave_hold_until, 0, sizeof(s_leave_hold_until));
+    memset(s_enter_hold_until, 0, sizeof(s_enter_hold_until));
+    memset(s_exit_hold_until, 0, sizeof(s_exit_hold_until));
+    s_target_count = 0;
+    xSemaphoreGive(s_state_lock);
+}
+
+static int sum_strategy1_people(const area_config_t *cfg)
+{
+    if (cfg == NULL) {
+        return 0;
+    }
+
+    int total = 0;
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    for (uint8_t i = 0; i < cfg->tag_count; i++) {
+        if (cfg->tags[i].strategy != 1) {
+            continue;
+        }
+        total += s_tag_states[i].active + s_tag_states[i].static_count;
+    }
+    xSemaphoreGive(s_state_lock);
+    return total;
+}
+
+static esp_err_t refresh_targets_internal(bool force)
+{
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const TickType_t now = xTaskGetTickCount();
+    if (!force && (now - s_last_target_refresh) < pdMS_TO_TICKS(1000)) {
+        return ESP_OK;
+    }
+    s_last_target_refresh = now;
+
+    uint8_t query = C4004_QUERY_DATA;
+    if (!request_frame(C4004_CTRL_TRAJECTORY, C4004_CMD_TRAJECTORY_QUERY_TARGET,
+                       &query, 1, &s_work_packet, C4004_DEFAULT_TIMEOUT_MS)) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    parse_targets(s_work_packet.data, s_work_packet.len);
+    xSemaphoreGive(s_state_lock);
+    return ESP_OK;
+}
+
+esp_err_t c4004_sensor_recover(const area_config_t *cfg, bool full_reset)
+{
+    if (!s_ready || cfg == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGW(TAG, "C4004 recover (%s): %u tags",
+             full_reset ? "full reset" : "re-sync", cfg->tag_count);
+
+    reset_local_state();
+    if (cfg->tag_count == 0) {
+        return clear_all_tags_locked();
+    }
+
+    return c4004_sensor_sync_tags(cfg, full_reset ? 0 : cfg->tag_count);
+}
+
+#if CONFIG_C4004_AUTO_RECOVER_ENABLE
+static void c4004_health_task(void *arg)
+{
+    (void)arg;
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(30000));
+
+        if (!s_ready) {
+            continue;
+        }
+
+        area_config_t cfg = {0};
+        if (area_config_get(&cfg) != ESP_OK || !cfg.enabled || cfg.tag_count == 0) {
+            continue;
+        }
+
+        (void)refresh_targets_internal(true);
+
+        uint8_t global_targets = 0;
+        xSemaphoreTake(s_state_lock, portMAX_DELAY);
+        global_targets = s_target_count;
+        xSemaphoreGive(s_state_lock);
+
+        const int tag_people = sum_strategy1_people(&cfg);
+        const TickType_t now = xTaskGetTickCount();
+        bool do_recover = false;
+        bool full_reset = false;
+        const char *reason = NULL;
+
+        if (global_targets == 0 && tag_people > 0) {
+            if (s_ghost_mismatch_streak < 255) {
+                s_ghost_mismatch_streak++;
+            }
+        } else {
+            s_ghost_mismatch_streak = 0;
+        }
+
+        if (s_ghost_mismatch_streak >= 2) {
+            if (s_last_ghost_recover == 0 ||
+                (now - s_last_ghost_recover) >= pdMS_TO_TICKS(CONFIG_C4004_GHOST_RECOVER_COOLDOWN_MS)) {
+                do_recover = true;
+                full_reset = true;
+                reason = "trajectory empty but tag people > 0 (confirmed)";
+                s_last_ghost_recover = now;
+                s_last_periodic_recover = now;
+                s_ghost_mismatch_streak = 0;
+            }
+        } else if (s_last_periodic_recover == 0 ||
+                   (now - s_last_periodic_recover) >= pdMS_TO_TICKS(CONFIG_C4004_AUTO_RECOVER_INTERVAL_MS)) {
+            do_recover = true;
+            full_reset = true;
+            reason = "periodic full re-sync";
+            s_last_periodic_recover = now;
+        }
+
+        if (do_recover) {
+            ESP_LOGW(TAG, "auto recover: %s", reason);
+            esp_err_t err = c4004_sensor_recover(&cfg, full_reset);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "auto recover failed: %s", esp_err_to_name(err));
+            }
+        }
+    }
+}
+#endif
+
 static esp_err_t init_uart(void)
 {
     uart_config_t cfg = {
@@ -861,6 +1041,14 @@ esp_err_t c4004_sensor_start(void)
         s_ready = false;
         return ESP_ERR_NO_MEM;
     }
+
+#if CONFIG_C4004_AUTO_RECOVER_ENABLE
+    if (xTaskCreate(c4004_health_task, "c4004_health", 4096, NULL, 2, &s_health_task) != pdPASS) {
+        ESP_LOGW(TAG, "C4004 health task create failed (auto-recover disabled)");
+        s_health_task = NULL;
+    }
+#endif
+
     return ESP_OK;
 }
 
@@ -951,6 +1139,55 @@ esp_err_t c4004_sensor_get_tag_status(uint8_t index, area_status_t *out)
     return ESP_OK;
 }
 
+esp_err_t c4004_sensor_refresh_targets(void)
+{
+    return refresh_targets_internal(false);
+}
+
+bool c4004_sensor_refine_people_count(uint8_t index, const area_rect_t *rect, area_status_t *st)
+{
+    if (!s_ready || rect == NULL || st == NULL || index >= AREA_TAG_MAX) {
+        return false;
+    }
+
+    int traj_active = 0;
+    int traj_static = 0;
+    if (c4004_sensor_count_targets_in_rect(rect, &traj_active, &traj_static) != ESP_OK) {
+        return false;
+    }
+
+    const int traj_total = traj_active + traj_static;
+    if (traj_total == 0) {
+        return false;
+    }
+
+    const int tag_total = st->active + st->static_count;
+    if (st->active == traj_active && st->static_count == traj_static) {
+        return false;
+    }
+
+    /* TAG 多于轨迹：轨迹可能尚未跟上（多目标入区），保留 TAG 以便 +1 上报 */
+    if (tag_total > traj_total) {
+        ESP_LOGD(TAG, "tag[%u] people %d > traj %d, keep tag (multi-target)",
+                 index, tag_total, traj_total);
+        return false;
+    }
+
+    if (tag_total < traj_total) {
+        ESP_LOGD(TAG, "tag[%u] people capped %d -> %d (trajectory)",
+                 index, tag_total, traj_total);
+    }
+
+    st->active = traj_active;
+    st->static_count = traj_static;
+
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    s_tag_states[index].active = st->active;
+    s_tag_states[index].static_count = st->static_count;
+    xSemaphoreGive(s_state_lock);
+    return true;
+}
+
 esp_err_t c4004_sensor_query_target(float *x, float *y, uint8_t *target_count, int8_t *picked_index)
 {
     if (!s_ready) {
@@ -1002,5 +1239,39 @@ esp_err_t c4004_sensor_query_target(float *x, float *y, uint8_t *target_count, i
 
     ESP_LOGI(TAG, "query target: count=%u picked[%d]=(%.0f, %.0f) cm",
              count, idx, (double)s_targets[idx].x, (double)s_targets[idx].y);
+    return ESP_OK;
+}
+
+static bool point_in_rect(const area_rect_t *rect, int16_t x, int16_t y)
+{
+    return x >= (int16_t)rect->min_x && x <= (int16_t)rect->max_x &&
+           y >= (int16_t)rect->min_y && y <= (int16_t)rect->max_y;
+}
+
+esp_err_t c4004_sensor_count_targets_in_rect(const area_rect_t *rect, int *active, int *static_count)
+{
+    if (rect == NULL || active == NULL || static_count == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *active = 0;
+    *static_count = 0;
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    for (uint8_t i = 0; i < s_target_count; i++) {
+        const c4004_target_t *target = &s_targets[i];
+        if (!point_in_rect(rect, target->x, target->y)) {
+            continue;
+        }
+        if (target->kinesia == 0x02) {
+            (*active)++;
+        } else {
+            (*static_count)++;
+        }
+    }
+    xSemaphoreGive(s_state_lock);
     return ESP_OK;
 }

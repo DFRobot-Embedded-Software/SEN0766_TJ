@@ -19,6 +19,14 @@ static const char *TAG = "sensor_data";
 
 static area_config_t s_area_config;
 static bool s_c4004_started;
+static area_config_changed_cb_t s_area_config_changed_cb;
+
+static void notify_area_config_changed(void)
+{
+    if (s_area_config_changed_cb != NULL) {
+        s_area_config_changed_cb();
+    }
+}
 
 #define C4004_BOOT_TASK_STACK 6144
 
@@ -312,6 +320,10 @@ esp_err_t sensor_data_get_snapshot(sensor_snapshot_t *out)
 
     out->area_count = s_area_config.tag_count;
 
+    if (c4004_sensor_is_ready()) {
+        (void)c4004_sensor_refresh_targets();
+    }
+
     for (uint8_t i = 0; i < s_area_config.tag_count; i++) {
         const area_tag_t *tag = &s_area_config.tags[i];
         area_status_t *st = &out->areas[i];
@@ -321,6 +333,13 @@ esp_err_t sensor_data_get_snapshot(sensor_snapshot_t *out)
 
         if (c4004_sensor_get_tag_status(i, st) != ESP_OK) {
             st->strategy = tag->strategy;
+        }
+
+        if (tag->strategy == 1 && c4004_sensor_is_ready()) {
+            area_rect_t rect = {0};
+            if (area_coords_to_rect_for_radar(tag, &rect) == ESP_OK) {
+                (void)c4004_sensor_refine_people_count(i, &rect, st);
+            }
         }
     }
     return ESP_OK;
@@ -341,6 +360,9 @@ esp_err_t area_config_set_enabled(bool enabled)
     esp_err_t err = area_config_save();
     if (err == ESP_OK && enabled) {
         c4004_sync_if_ready(0);
+    }
+    if (err == ESP_OK) {
+        notify_area_config_changed();
     }
     return err;
 }
@@ -371,6 +393,7 @@ esp_err_t area_config_add_tag(const area_tag_t *tag)
     esp_err_t err = area_config_save();
     if (err == ESP_OK) {
         c4004_sync_if_ready(prev_count);
+        notify_area_config_changed();
     }
     return err;
 }
@@ -391,6 +414,12 @@ esp_err_t area_config_remove_tag(uint8_t index)
     esp_err_t err = area_config_save();
     if (err == ESP_OK) {
         c4004_sync_if_ready(prev_count);
+        notify_area_config_changed();
     }
     return err;
+}
+
+void area_config_set_change_callback(area_config_changed_cb_t cb)
+{
+    s_area_config_changed_cb = cb;
 }

@@ -54,4 +54,70 @@ menu "C4004 毫米波雷达 (DFRobot UART)"
         help
             C4004 默认 115200。
 
+    config C4004_AUTO_RECOVER_ENABLE
+        bool "启用 C4004 自动恢复"
+        default y
+        help
+            长时间运行后雷达可能残留假目标（如静止 1 人），断电可恢复。
+            启用后由后台任务定期 re-sync，或在轨迹与人数矛盾时全量重建标签。
+
+    config C4004_AUTO_RECOVER_INTERVAL_MS
+        int "定期 re-sync 间隔 (ms)"
+        depends on C4004_AUTO_RECOVER_ENABLE
+        default 21600000
+        range 300000 86400000
+        help
+            每隔该时间对 C4004 清空并重建区域标签（默认 6 小时）。
+            过短会占用 UART 导致 MCP 上报卡顿。
+
+    config C4004_GHOST_RECOVER_COOLDOWN_MS
+        int "假目标恢复冷却 (ms)"
+        depends on C4004_AUTO_RECOVER_ENABLE
+        default 60000
+        range 10000 600000
+        help
+            检测到「全局无轨迹但区域人数>0」时触发全量标签重建，
+            两次触发之间的最短间隔。
+
+endmenu
+
+menu "MCP 雷达事件"
+
+    config MCP_RADAR_POLL_INTERVAL_MS
+        int "C4004 事件检测轮询间隔 (ms)"
+        default 500
+        range 200 5000
+        help
+            后台任务读取区域状态的间隔。越短响应越快，CPU 占用略高。
+
+    config MCP_RADAR_DWELL_MS
+        int "区域停留告警时长 (ms)"
+        default 30000
+        range 5000 300000
+        help
+            某区域持续有人超过该时长时，触发 area_dwell（停留过久）事件。
+
+    config MCP_RADAR_OCC_DEBOUNCE_MS
+        int "人数统计区域进出防抖 (ms)"
+        default 1500
+        range 500 10000
+        help
+            strategy 1 区域：人数读数需连续稳定超过该时长才触发事件。
+            人数每增加 1 上报一次 area_enter，每减少 1 上报一次 area_exit。
+
+    config MCP_RADAR_CROSSING_COOLDOWN_MS
+        int "房间无人后抑制重复离开 (ms)"
+        default 3000
+        range 1000 30000
+        help
+            room_empty 上报后，在该时长内抑制重复的 area_exit（雷达假目标）。
+            同一区域多次 area_enter/area_exit 由进出防抖控制，不再额外冷却。
+
+    config MCP_EVENT_LOG_SIZE
+        int "事件环形缓冲区条数"
+        default 32
+        range 8 128
+        help
+            sensor://events 与单区域资源 read 时返回的近期事件条数上限。
+
 endmenu
