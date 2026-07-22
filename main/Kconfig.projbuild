@@ -81,6 +81,241 @@ menu "C4004 毫米波雷达 (DFRobot UART)"
 
 endmenu
 
+menu "YAMNet 声音事件分类 (TFLite Micro)"
+
+    config YAMNET_ENABLE
+        bool "启用 YAMNet 声音分类"
+        default n
+        help
+            加载 models/yamnet/yamnet_cry_distill.tflite（INT8，mel 输入），
+            对 16 kHz 音频做推理。需先运行 scripts/fetch_yamnet_model.ps1，并启用 PSRAM。
+            更换模型：覆盖同名 .tflite 后重新 build flash（输入输出约定见 models/yamnet/README.md）。
+
+    config YAMNET_VERIFY_ONLY
+        bool "仅验证 YAMNet（关闭 WiFi/传感器/MCP/Web）"
+        depends on YAMNET_ENABLE
+        default n
+        help
+            启动后只运行 YAMNet 音频采集 + 推理，串口打印 Top-3 结果。
+            用于隔离调试模型与麦克风，不初始化 STCC4、C4004、WiFi、MCP、Web。
+
+    choice YAMNET_AUDIO_SOURCE
+        prompt "音频输入来源（由 audio_capture 使用）"
+        depends on YAMNET_ENABLE
+        default YAMNET_AUDIO_SOURCE_ES8388
+        help
+            配置项供独立模块 audio_capture 使用，YAMNet 仅订阅 PCM。
+            ES8388：板载/外接 codec 麦克风（推荐）。
+            Fake：合成噪声，仅验证 mel + 推理。
+
+        config YAMNET_AUDIO_SOURCE_ES8388
+            bool "ES8388 codec 麦克风"
+        config YAMNET_AUDIO_SOURCE_FAKE
+            bool "Fake（测试噪声）"
+    endchoice
+
+    config YAMNET_ES8388_SHARE_STCC4_I2C
+        bool "ES8388 与 STCC4 共用 I2C0"
+        depends on YAMNET_AUDIO_SOURCE_ES8388
+        default n
+        help
+            仅当 ES8388 与 STCC4 挂在同一组 SDA/SCL 时开启。
+            两路独立 I2C 时请关闭，并配置下方端口与引脚。
+
+    config YAMNET_ES8388_I2C_PORT
+        int "ES8388 I2C 控制器编号"
+        depends on YAMNET_AUDIO_SOURCE_ES8388 && !YAMNET_ES8388_SHARE_STCC4_I2C
+        default 1
+        range 0 1
+        help
+            STCC4 占用 I2C0 时，ES8388 请用 I2C1。
+
+    config YAMNET_ES8388_I2C_SDA
+        int "ES8388 I2C SDA GPIO"
+        depends on YAMNET_AUDIO_SOURCE_ES8388 && !YAMNET_ES8388_SHARE_STCC4_I2C
+        default 32
+        help
+            必须是 ES8388 实际接线的 SDA，不能填 STCC4 的脚。
+
+    config YAMNET_ES8388_I2C_SCL
+        int "ES8388 I2C SCL GPIO"
+        depends on YAMNET_AUDIO_SOURCE_ES8388 && !YAMNET_ES8388_SHARE_STCC4_I2C
+        default 31
+        help
+            必须是 ES8388 实际接线的 SCL，不能填 STCC4 的脚。
+
+    config YAMNET_ES8388_I2C_ADDR
+        hex "ES8388 I2C 7-bit 地址"
+        depends on YAMNET_AUDIO_SOURCE_ES8388
+        default 0x10
+        help
+            7-bit 地址，用于 I2C 扫描。常见为 0x10（ADDR 脚接地），
+            ADDR 接高时多为 0x11。传给 esp_codec_dev 时会自动转为 8-bit（左移 1 位）。
+
+    config YAMNET_I2S_BCLK
+        int "I2S BCLK GPIO"
+        depends on YAMNET_AUDIO_SOURCE_ES8388
+        default 12
+
+    config YAMNET_I2S_WS
+        int "I2S WS/LRCK GPIO"
+        depends on YAMNET_AUDIO_SOURCE_ES8388
+        default 10
+
+    config YAMNET_I2S_DIN
+        int "I2S DIN GPIO（codec→ESP，录音）"
+        depends on YAMNET_AUDIO_SOURCE_ES8388
+        default 9
+
+    config YAMNET_I2S_DOUT
+        int "I2S DOUT GPIO（-1=不使用）"
+        depends on YAMNET_AUDIO_SOURCE_ES8388
+        default 11
+        help
+            仅录音时可悬空；若驱动要求有引脚，填实际 DOUT。
+            填 -1 表示 I2S_GPIO_UNUSED。
+
+    config YAMNET_I2S_USE_MCLK
+        bool "输出 I2S MCLK"
+        depends on YAMNET_AUDIO_SOURCE_ES8388
+        default y
+        help
+            ES8388 通常需要 MCLK。
+
+    config YAMNET_I2S_MCLK
+        int "I2S MCLK GPIO"
+        depends on YAMNET_I2S_USE_MCLK
+        default 13
+
+    config YAMNET_ES8388_USE_PA
+        bool "使用功放使能脚"
+        depends on YAMNET_AUDIO_SOURCE_ES8388
+        default n
+
+    config YAMNET_ES8388_PA_PIN
+        int "功放使能 GPIO"
+        depends on YAMNET_ES8388_USE_PA
+        default 53
+
+    config YAMNET_ES8388_MIC_GAIN_DB
+        int "麦克风输入增益 (dB)"
+        depends on YAMNET_AUDIO_SOURCE_ES8388
+        default 36
+        range 0 36
+        help
+            由 audio_capture 使用。硬件增益上限 36 dB；远场再调 AUDIO_CAPTURE_DIGITAL_GAIN。
+
+    config YAMNET_INFER_MIN_INTERVAL_MS
+        int "两次推理最小间隔 (ms)"
+        depends on YAMNET_ENABLE
+        range 200 10000
+        default 500
+        help
+            cry-distill 单次约几十 ms，默认 500。过短会占满 CPU。
+
+    config YAMNET_INFER_HOP_FRAMES
+        int "相邻 patch 间隔帧数 (10ms/帧)"
+        depends on YAMNET_ENABLE
+        range 48 96
+        default 48
+        help
+            48 = 50% 重叠（更跟手）；96 = 无重叠（推理更稀）。
+
+    config YAMNET_INFER_RMS_MIN
+        int "静音门限 pcm_rms（0=关闭）"
+        depends on YAMNET_ENABLE
+        range 0 10000
+        default 150
+        help
+            RMS 低于该值跳过 Invoke。数字增益后底噪会抬高，远场可再降。
+
+    config YAMNET_EVENT_VOTE_WINDOW
+        int "事件投票窗口默认 N（最近 N 次）"
+        depends on YAMNET_ENABLE
+        range 1 16
+        default 5
+        help
+            写入 yamnet_events 表中未单独指定的默认 vote_window（见 audio/yamnet/yamnet_events.c）。
+
+    config YAMNET_EVENT_VOTE_NEED
+        int "事件投票默认至少命中次数"
+        depends on YAMNET_ENABLE
+        range 1 16
+        default 3
+
+    config YAMNET_EVENT_HOLD_MS
+        int "事件告警默认冷却 (ms)"
+        depends on YAMNET_ENABLE
+        range 500 60000
+        default 4000
+
+    config YAMNET_LOG_VERBOSE
+        bool "每次推理都打印完整 Top-3"
+        depends on YAMNET_ENABLE
+        default n
+        help
+            关闭时仅在关注事件分数升高或周期性摘要时打印，减少刷屏。
+
+    config YAMNET_INFER_TASK_CORE
+        int "推理任务绑定 CPU (-1=不绑定)"
+        depends on YAMNET_ENABLE
+        range -1 1
+        default -1
+        help
+            绑定 CPU1 时长时间推理可能导致 IDLE1 看门狗超时，建议 -1。
+
+    config YAMNET_DISABLE_ESP_NN
+        bool "强制 TFLite reference 内核（极慢，仅调试）"
+        depends on YAMNET_ENABLE
+        default n
+        help
+            默认关闭。仅当 ESP-NN 结果异常时再开启。
+
+endmenu
+
+menu "音频采集 (audio_capture)"
+
+    config AUDIO_CAPTURE_DIGITAL_GAIN
+        int "数字增益倍数 (采集后、扇出前)"
+        depends on YAMNET_ENABLE
+        default 4
+        range 1 16
+        help
+            独立于 YAMNet/esp-sr/透传。int16 饱和削波。ES8388 引脚仍在 YAMNet 菜单（由 audio_capture 使用）。
+
+endmenu
+
+menu "音频网络透传 (唤醒后 UDP PCM)"
+
+    config AUDIO_STREAM_ENABLE
+        bool "启用 UDP 裸 PCM 透传骨架"
+        depends on YAMNET_ENABLE
+        default n
+        help
+            独立订阅 audio_capture，不经 YAMNet。audio_stream_start/stop 控制发送；
+            正式路径留给 esp-sr 唤醒回调。需 WiFi。完整应用在 app_main 里 init。
+
+    config AUDIO_STREAM_UDP_HOST
+        string "UDP 目标主机"
+        depends on AUDIO_STREAM_ENABLE
+        default "192.168.1.100"
+
+    config AUDIO_STREAM_UDP_PORT
+        int "UDP 目标端口"
+        depends on AUDIO_STREAM_ENABLE
+        default 9000
+        range 1 65535
+
+    config AUDIO_STREAM_MAX_MS
+        int "单次透传最长时长 (ms)"
+        depends on AUDIO_STREAM_ENABLE
+        default 15000
+        range 1000 120000
+        help
+            超时自动 stop，防止一直占网。0 不适用（至少 1s）。
+
+endmenu
+
 menu "MCP 雷达事件"
 
     config MCP_RADAR_POLL_INTERVAL_MS

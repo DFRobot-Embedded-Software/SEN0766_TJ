@@ -11,3 +11,6 @@
 # OS
 .DS_Store
 Thumbs.db
+
+# YAMNet weights (~4MB)；用 scripts/fetch_yamnet_model.ps1 下载
+models/yamnet/yamnet.tflite

@@ -211,6 +211,38 @@ C4004 通过 **UART** 与 ESP32-P4 通信（可在 `idf.py menuconfig` → **C40
 - 在 Web 页面 **设备数据** 中启用区域配置并添加标签后，配置会自动同步到雷达
 - 若启动报 `C4004 not responding`，检查 TX/RX 是否接反、供电与 GND 是否可靠
 
+### YAMNet 声音事件分类（方案 A）
+
+使用 MCU 专用 INT8 模型（[yamnet-mel-int8-tflm](https://huggingface.co/chayuto/yamnet-mel-int8-tflm)），**不是** Kaggle 官方带图内 FFT 的 `yamnet.tflite`。
+
+1. 下载模型到 `models/yamnet/`：
+
+```powershell
+.\scripts\fetch_yamnet_model.ps1
+```
+
+2. 打开功能并确认 PSRAM：
+
+```powershell
+idf.py menuconfig
+```
+
+- `Component config → ESP PSRAM`：启用 SPIRAM（`sdkconfig.defaults.esp32p4` 已默认打开）
+- `YAMNet 声音事件分类`：勾选 **启用 YAMNet**
+- 音频来源：默认 **ES8388**；无麦验证可选 Fake
+- ES8388 默认与 STCC4 **共用 I2C0**（SDA/SCL 见 STCC4 配置），I2C 地址 `0x10`
+- I2S 默认：BCLK=12 / WS=10 / DIN=9 / MCLK=13（请按你的接线改 menuconfig）
+
+3. 全量烧录（含 `yamnet` 模型分区）：
+
+```powershell
+idf.py build flash monitor
+```
+
+串口应看到 `ES8388 record ready` 与周期性 `infer xxx ms | #1 ...`。
+
+> 若 ES8388 接在独立 I2C，关闭「与 STCC4 共用 I2C0」并设置 SDA/SCL。ADDR 接高时地址改为 `0x11`。
+
 ### 修改网页（无需改 C 代码）
 
 前端文件位于 `spiffs/` 目录，可直接编辑：
