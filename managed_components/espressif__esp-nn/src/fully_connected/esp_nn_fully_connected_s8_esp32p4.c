@@ -11,8 +11,9 @@
  * Fully connected layer for s8 using ESP32-P4 PIE SIMD.
  *
  * Uses esp.vmulas.s8.xacc.ld.ip for fused 16-wide s8 MAC + load.
- * Pre-computes filter_sum * input_offset (like conv) so PIE path
- * works even with non-zero input_offset.
+ * Per-channel correction `filter_sum * input_offset` is precomputed once
+ * so the PIE dot product runs with non-zero input_offset (the common
+ * TFLite case). Non-zero filter_offset is rare and falls back to scalar.
  *
  * Inner loop is software-pipelined:
  *   iteration N: MAC(q0,q1) + load_next_input(q0)
@@ -133,25 +134,40 @@ void esp_nn_fully_connected_s8_esp32p4(const int8_t *input_data,
         ::: "x29"
     );
 
+    /* SIMD path with optional corrections. Math:
+     *   sum((x+io)*(w+fo)) = sum(x*w) + io*sum(w) + fo*sum(x) + row_len*io*fo
+     * fc_dot_s8_pie computes sum(x*w); the rest is folded into per-ch corrections. */
+
+    int32_t input_sum = 0;
+    if (filter_offset != 0) {
+        for (int32_t i = 0; i < row_len; i++) {
+            input_sum += input_data[i];
+        }
+    }
+    int32_t global_corr = filter_offset * input_sum
+                          + (int32_t)row_len * input_offset * filter_offset;
+
+    int32_t corrections[out_channels];
+    for (int32_t ch = 0; ch < out_channels; ++ch) {
+        int32_t corr = global_corr;
+        if (input_offset != 0) {
+            const int8_t *f_ptr = filter_data + (int32_t)row_len * ch;
+            int32_t filter_sum = 0;
+            for (int32_t i = 0; i < row_len; i++) {
+                filter_sum += f_ptr[i];
+            }
+            corr += filter_sum * input_offset;
+        }
+        if (bias) {
+            corr += bias[ch];
+        }
+        corrections[ch] = corr;
+    }
+
     for (int32_t out_c = 0; out_c < out_channels; ++out_c) {
         const int8_t *filter_row = filter_data + (int32_t)row_len * out_c;
-
-        int32_t result;
-        if (input_offset == 0 && filter_offset == 0) {
-            /* Fast PIE path: pure s8 dot product */
-            result = fc_dot_s8_pie(input_data, filter_row, row_len);
-        } else {
-            /* Scalar path with offsets */
-            result = 0;
-            for (int32_t i = 0; i < row_len; i++) {
-                result += ((int32_t)input_data[i] + input_offset) *
-                          ((int32_t)filter_row[i] + filter_offset);
-            }
-        }
-
-        if (bias) {
-            result += bias[out_c];
-        }
+        int32_t result = fc_dot_s8_pie(input_data, filter_row, row_len);
+        result += corrections[out_c];
         result = esp_nn_requantize(result, out_mult, out_shift);
         result += out_offset;
         result = max(result, activation_min);
@@ -182,23 +198,36 @@ void esp_nn_fully_connected_per_ch_s8_esp32p4(const int8_t *input_data,
         ::: "x29"
     );
 
+    int32_t input_sum = 0;
+    if (filter_offset != 0) {
+        for (int32_t i = 0; i < row_len; i++) {
+            input_sum += input_data[i];
+        }
+    }
+    int32_t global_corr = filter_offset * input_sum
+                          + (int32_t)row_len * input_offset * filter_offset;
+
+    int32_t corrections[out_channels];
+    for (int32_t ch = 0; ch < out_channels; ++ch) {
+        int32_t corr = global_corr;
+        if (input_offset != 0) {
+            const int8_t *f_ptr = filter_data + (int32_t)row_len * ch;
+            int32_t filter_sum = 0;
+            for (int32_t i = 0; i < row_len; i++) {
+                filter_sum += f_ptr[i];
+            }
+            corr += filter_sum * input_offset;
+        }
+        if (bias) {
+            corr += bias[ch];
+        }
+        corrections[ch] = corr;
+    }
+
     for (int32_t out_c = 0; out_c < out_channels; ++out_c) {
         const int8_t *filter_row = filter_data + (int32_t)row_len * out_c;
-
-        int32_t result;
-        if (input_offset == 0 && filter_offset == 0) {
-            result = fc_dot_s8_pie(input_data, filter_row, row_len);
-        } else {
-            result = 0;
-            for (int32_t i = 0; i < row_len; i++) {
-                result += ((int32_t)input_data[i] + input_offset) *
-                          ((int32_t)filter_row[i] + filter_offset);
-            }
-        }
-
-        if (bias) {
-            result += bias[out_c];
-        }
+        int32_t result = fc_dot_s8_pie(input_data, filter_row, row_len);
+        result += corrections[out_c];
         result = esp_nn_requantize(result, out_mult[out_c], out_shift[out_c]);
         result += out_offset;
         result = max(result, activation_min);

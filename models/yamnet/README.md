@@ -15,20 +15,31 @@
 main/audio/
   capture/   audio_capture     ← 唯一碰 ES8388 / 数字增益 / 多 sink
   stream/    audio_stream      ← UDP 透传（独立订阅 capture）
+  wake/      esp_sr_wake       ← esp-sr AFE + WakeNet
   yamnet/    pcm_in / mel / events / classifier
 ```
 
 ```text
 audio_capture
      │ multi-sink
-     ├─ yamnet_pcm_in 私有 ring → mel → TFLite → events
-     ├─ (未来) esp-sr → audio_stream_start()
-     └─ audio_stream（可选）
+     ├─ yamnet_pcm_in → mel → TFLite → events
+     ├─ esp_sr_wake (AFE feed/fetch) → 唤醒后 audio_stream_start()
+     └─ audio_stream（可选 UDP PCM）
 ```
 
 关注哪些声音、用哪些 class id、阈值与投票：**只改** `main/audio/yamnet/yamnet_events.c` 里的 `s_event_table`。
 
-远场：`YAMNET_ES8388_MIC_GAIN_DB` + `AUDIO_CAPTURE_DIGITAL_GAIN`。透传：`AUDIO_STREAM_*` + `audio_stream_start()`。
+远场：`YAMNET_ES8388_MIC_GAIN_DB` + `AUDIO_CAPTURE_DIGITAL_GAIN`。
+
+### 语音唤醒（esp-sr）
+
+1. `idf.py add-dependency` 已含 `espressif/esp-sr`；`config/partitions.csv` 有 `model` 分区（4M）。
+2. menuconfig：
+   - **ESP-SR 语音唤醒** → 启用 `ESP_SR_WAKE_ENABLE`
+   - **ESP Speech Recognition** → 选 WakeNet，例如 `wn9_hilexin`（说「Hi 乐鑫」）
+   - 可选：启用 `AUDIO_STREAM_ENABLE` + `ESP_SR_WAKE_START_STREAM`（唤醒后 UDP 透传）
+3. 全量烧录：`idf.py build flash`（会把选中的 SR 模型写入 `model` 分区）
+4. 串口出现 `WAKEWORD DETECTED` 即成功；若开了透传则自动 `audio_stream_start()`。
 
 ## 添加新事件示例
 

@@ -185,6 +185,16 @@ http://192.168.x.x
 - 串口日志出现 `CO2=xxx ppm, T=xx.x°C, RH=xx.x%` 表示采样正常
 - 若启动报 `STCC4 not found`，检查接线、上拉与供电
 
+### WS2812 彩灯
+
+| 信号 | ESP32-P4 |
+|------|----------|
+| DIN | **GPIO21**（menuconfig → **WS2812 彩灯** 可改） |
+| VCC / GND | 按灯珠供电（与 P4 共地） |
+
+- 默认 1 颗；启动后弱白表示驱动已就绪
+- API：`ws2812_led_set_rgb(r,g,b)` / `ws2812_led_clear()`（见 `main/led/ws2812_led.h`）
+
 ### C4004 毫米波雷达接线
 
 C4004 通过 **UART** 与 ESP32-P4 通信（可在 `idf.py menuconfig` → **C4004 毫米波雷达** 中修改引脚与波特率）：

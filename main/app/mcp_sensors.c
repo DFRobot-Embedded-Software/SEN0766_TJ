@@ -3,6 +3,7 @@
 
 #include "esp_log.h"
 #include "sdkconfig.h"
+#include "ws2812_led.h"
 #if !CONFIG_YAMNET_VERIFY_ONLY
 #include "esp_sntp.h"
 #include "mdns.h"
@@ -16,6 +17,9 @@
 #include "yamnet_classifier.h"
 #if CONFIG_AUDIO_STREAM_ENABLE
 #include "audio_stream.h"
+#endif
+#if CONFIG_ESP_SR_WAKE_ENABLE
+#include "esp_sr_wake.h"
 #endif
 #endif
 
@@ -83,18 +87,47 @@ static void on_ap_started(void)
 
 #endif /* !YAMNET_VERIFY_ONLY */
 
+#if CONFIG_YAMNET_ENABLE
+static void start_audio_pipeline(void)
+{
+    esp_err_t err = yamnet_classifier_start(NULL, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "YAMNet start failed: %s", esp_err_to_name(err));
+    }
+
+#if CONFIG_AUDIO_STREAM_ENABLE
+    err = audio_stream_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "audio_stream init failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "audio_stream ready");
+    }
+#endif
+
+#if CONFIG_ESP_SR_WAKE_ENABLE
+    err = esp_sr_wake_start();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp-sr wake start failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "esp-sr wake listening (say wake word)");
+    }
+#endif
+}
+#endif
+
 void app_main(void)
 {
 #if CONFIG_YAMNET_VERIFY_ONLY
     ESP_LOGI(TAG, "YAMNet verify-only mode (no WiFi / sensors / MCP / Web)");
 
-#if CONFIG_YAMNET_ENABLE
-    esp_err_t err = yamnet_classifier_start(NULL, NULL);
+    esp_err_t err = ws2812_led_init();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "YAMNet start failed: %s", esp_err_to_name(err));
-        return;
+        ESP_LOGW(TAG, "WS2812 init failed: %s", esp_err_to_name(err));
     }
-    ESP_LOGI(TAG, "YAMNet running — watch serial for infer logs (pcm_rms / mel / Top-3)");
+
+#if CONFIG_YAMNET_ENABLE
+    start_audio_pipeline();
+    ESP_LOGI(TAG, "audio pipeline running — watch serial for YAMNet / wake logs");
 #else
     ESP_LOGE(TAG, "Enable CONFIG_YAMNET_ENABLE in menuconfig");
 #endif
@@ -109,21 +142,15 @@ void app_main(void)
         return;
     }
 
+    err = ws2812_led_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WS2812 init failed: %s", esp_err_to_name(err));
+    }
+
     sensor_data_init();
 
 #if CONFIG_YAMNET_ENABLE
-    err = yamnet_classifier_start(NULL, NULL);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "YAMNet start failed: %s (check model partition / PSRAM)", esp_err_to_name(err));
-    }
-#if CONFIG_AUDIO_STREAM_ENABLE
-    err = audio_stream_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "audio_stream init failed: %s", esp_err_to_name(err));
-    } else {
-        ESP_LOGI(TAG, "audio_stream ready (call audio_stream_start on wake)");
-    }
-#endif
+    start_audio_pipeline();
 #endif
 
     err = web_fs_init();

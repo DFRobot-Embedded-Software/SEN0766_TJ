@@ -38,13 +38,19 @@ void esp_nn_fully_connected_s8_test()
     int8_t *output_opt = (int8_t *)(((uint32_t)out_opt_orig + 15) & ~15);
     int32_t activation_min = -128;
     int32_t activation_max = 127;
-    int32_t input_offset = 0;
+    int32_t input_offset = 5; /* default non-zero, swept per iteration below */
     int32_t filter_offset = 0;
     int32_t out_shift = -10;
     int32_t out_offset = 5;
     int32_t out_mult = 0x59e492c4;
+    /* sweep input_offset over realistic TFLite range incl. boundaries */
+    const int32_t input_offsets[] = {0, 5, -1, 1, 127, -128, 110};
     printf("\n######## Running %s ##########\n", __FUNCTION__);
     for (int itr = 0; itr < 15; itr++) {
+        input_offset = input_offsets[itr % (int)(sizeof(input_offsets) / sizeof(input_offsets[0]))];
+        /* TFLite weights are symmetric (filter_offset == 0) almost always;
+         * a couple of iterations exercise the non-zero filter_offset SIMD path. */
+        filter_offset = (itr == 9 || itr == 12) ? 5 : 0;
         out_mult = INT32_MAX / row_len + rand() % INT16_MAX;
         switch (itr) {
         case 0:
@@ -137,8 +143,8 @@ void esp_nn_fully_connected_s8_test()
 #endif
             goto fc_s8_cleanup;
         }
-        printf(ANSI_COLOR_GREEN"[%3d] passed [row_len %"PRIu16", out_ch %"PRIu16"]"ANSI_COLOR_RESET,
-               itr, row_len, out_channels);
+        printf(ANSI_COLOR_GREEN"[%3d] passed [row_len %"PRIu16", out_ch %"PRIu16", in_off %4"PRId32"]"ANSI_COLOR_RESET,
+               itr, row_len, out_channels, input_offset);
         printf("\tcycles: c %8"PRIu32", opt %8"PRIu32"\n", total_c, total_opt);
     }
 
@@ -181,15 +187,18 @@ void esp_nn_fully_connected_per_ch_s8_test()
     int8_t *output_opt = (int8_t *)(((uint32_t)out_opt_orig + 15) & ~15);
     int32_t activation_min = -128;
     int32_t activation_max = 127;
-    int32_t input_offset = 0;
+    int32_t input_offset = 5; /* default non-zero, swept per iteration below */
     int32_t filter_offset = 0;
     int32_t out_offset = 7;
 
     int32_t* out_mult = NULL;
     int32_t* out_shift = NULL;
 
+    const int32_t input_offsets[] = {0, 5, -1, 1, 127, -128, 110};
     printf("\n######## Running %s ##########\n", __FUNCTION__);
     for (int itr = 0;  itr < 15; itr++) {
+        input_offset = input_offsets[itr % (int)(sizeof(input_offsets) / sizeof(input_offsets[0]))];
+        filter_offset = (itr == 9 || itr == 12) ? 5 : 0;
         int32_t out_shift_val = 0;
         switch (itr) {
         case 0:
@@ -279,10 +288,10 @@ void esp_nn_fully_connected_per_ch_s8_test()
             printf(ANSI_COLOR_RED"[%3d] failed\n"ANSI_COLOR_RESET, itr);
             goto fully_connected_per_ch_cleanup;
         }
-        printf(ANSI_COLOR_GREEN"[%3d] passed [row_len %"PRIu16", out_ch %"PRIu16"]"ANSI_COLOR_RESET,
-               itr, row_len, out_channels);
+        printf(ANSI_COLOR_GREEN"[%3d] passed [row_len %"PRIu16", out_ch %"PRIu16", in_off %4"PRId32"]"ANSI_COLOR_RESET,
+               itr, row_len, out_channels, input_offset);
         printf("\tcycles: c %8"PRIu32", opt %8"PRIu32"\n", total_c, total_opt);
-    
+
     fully_connected_per_ch_cleanup:
         if (out_shift) {
             free(out_shift);

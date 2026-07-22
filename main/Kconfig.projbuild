@@ -1,3 +1,25 @@
+menu "WS2812 彩灯"
+
+    config WS2812_ENABLE
+        bool "启用 WS2812 灯带"
+        default y
+        help
+            使用 RMT 驱动 WS2812/SK6812。数据线默认 GPIO21。
+
+    config WS2812_GPIO
+        int "数据线 GPIO"
+        depends on WS2812_ENABLE
+        default 21
+        range 0 54
+
+    config WS2812_LED_COUNT
+        int "灯珠数量"
+        depends on WS2812_ENABLE
+        default 1
+        range 1 64
+
+endmenu
+
 menu "STCC4 环境传感器 (DFRobot Gravity)"
 
     config STCC4_I2C_SDA
@@ -285,15 +307,40 @@ menu "音频采集 (audio_capture)"
 
 endmenu
 
-menu "音频网络透传 (唤醒后 UDP PCM)"
+menu "ESP-SR 语音唤醒"
 
-    config AUDIO_STREAM_ENABLE
-        bool "启用 UDP 裸 PCM 透传骨架"
+    config ESP_SR_WAKE_ENABLE
+        bool "启用 esp-sr 唤醒检测"
         depends on YAMNET_ENABLE
         default n
         help
-            独立订阅 audio_capture，不经 YAMNet。audio_stream_start/stop 控制发送；
-            正式路径留给 esp-sr 唤醒回调。需 WiFi。完整应用在 app_main 里 init。
+            订阅 audio_capture，经 AFE+WakeNet 检测唤醒词。
+            检测到后调用 audio_stream_start()（需 AUDIO_STREAM_ENABLE）。
+            menuconfig → ESP Speech Recognition 中选择 WakeNet 模型（默认建议 wn9_hilexin「Hi 乐鑫」），
+            并确保 partitions.csv 有 label=model 的分区。
+
+    config ESP_SR_WAKE_START_STREAM
+        bool "唤醒后自动开始 UDP 透传"
+        depends on ESP_SR_WAKE_ENABLE && AUDIO_STREAM_ENABLE
+        default y
+
+    config ESP_SR_WAKE_FETCH_CORE
+        int "AFE fetch 任务绑核 (-1=不绑定)"
+        depends on ESP_SR_WAKE_ENABLE
+        range -1 1
+        default 1
+
+endmenu
+
+menu "音频网络透传 (唤醒后 UDP PCM)"
+
+    config AUDIO_STREAM_ENABLE
+        bool "启用 UDP 裸 PCM 透传"
+        depends on YAMNET_ENABLE
+        default n
+        help
+            独立订阅 audio_capture。可由 esp-sr 唤醒后自动 start，或手动调用。
+            需 WiFi 已连接。
 
     config AUDIO_STREAM_UDP_HOST
         string "UDP 目标主机"
