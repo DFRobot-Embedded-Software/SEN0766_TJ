@@ -1786,3 +1786,86 @@ video {
   padding-top: 0.875rem;
   padding-bottom: 0.875rem;
 }
+
+.ota-version-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.ota-version-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  border-radius: 1rem;
+  border: 1px solid rgb(226 232 240 / 1);
+  background: rgb(248 250 252 / 1);
+  padding: 1rem 1.25rem;
+}
+
+.ota-version-label {
+  font-size: 0.8125rem;
+  color: rgb(100 116 139 / 1);
+}
+
+.ota-version-value {
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: rgb(15 23 42 / 1);
+  word-break: break-all;
+}
+
+.ota-pending-notice {
+  margin-bottom: 1.25rem;
+  border-radius: 1rem;
+  border: 1px solid rgb(253 230 138 / 1);
+  background: rgb(255 251 235 / 1);
+  color: rgb(146 64 14 / 1);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  padding: 0.875rem 1.125rem;
+}
+
+.ota-file-input {
+  height: 3.5rem;
+  display: flex;
+  align-items: center;
+  border-radius: 1rem;
+  border-width: 1px;
+  border-color: rgb(203 213 225 / 1);
+  background-color: rgb(255 255 255 / 1);
+  padding: 0 1rem;
+  font-size: 0.9375rem;
+  color: rgb(15 23 42 / 1);
+}
+
+.ota-progress-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.ota-progress-track {
+  flex: 1 1 0%;
+  height: 0.625rem;
+  border-radius: 9999px;
+  background: rgb(226 232 240 / 1);
+  overflow: hidden;
+}
+
+.ota-progress-bar {
+  height: 100%;
+  width: 0%;
+  border-radius: 9999px;
+  background: rgb(8 145 178 / 1);
+  transition: width 0.2s ease;
+}
+
+.ota-progress-text {
+  min-width: 3.5rem;
+  text-align: right;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: rgb(51 65 85 / 1);
+}

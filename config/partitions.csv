@@ -1,8 +1,10 @@
 # Name,   Type, SubType, Offset,  Size, Flags
-# 16MB: app 3M + web 1M + YAMNet SPIFFS 5M + esp-sr model 4M
+# 16MB: OTA app 2x3M + otadata + web 1M + YAMNet SPIFFS 2M + esp-sr model 4M
 nvs,      data, nvs,     0x9000,  0x6000,
 phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 3M,
+otadata,  data, ota,     0x10000, 0x2000,
+ota_0,    app,  ota_0,   ,        3M,
+ota_1,    app,  ota_1,   ,        3M,
 storage,  data, spiffs,  ,        1M,
 yamnet,   data, spiffs,  ,        2M,
 model,    data, ,        ,        4M,

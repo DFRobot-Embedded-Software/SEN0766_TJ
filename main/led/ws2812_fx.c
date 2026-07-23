@@ -33,6 +33,8 @@ static volatile bool s_busy;
 static ws2812_fx_cfg_t s_cfg;
 static uint32_t s_gen; /* 递增以打断旧循环 */
 
+static const char *TAG = "ws2812_fx";
+
 static void ensure_lock(void)
 {
     if (s_lock == NULL) {

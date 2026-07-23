@@ -1,7 +1,4 @@
-#include "sensor_data.h"
-#include "stcc4_sensor.h"
-#include "ltr303_sensor.h"
-#include "sc7a20h_sensor.h"
+#include "radar_area.h"
 #include "c4004_sensor.h"
 
 #include <stdlib.h>
@@ -14,7 +11,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
-static const char *TAG = "sensor_data";
+static const char *TAG = "radar_area";
 
 #define NVS_NAMESPACE "area_cfg"
 #define NVS_KEY_JSON  "json_v2"
@@ -139,13 +136,7 @@ esp_err_t area_coords_to_rect(const area_tag_t *tag, area_rect_t *out)
     return ESP_OK;
 }
 
-esp_err_t area_coords_to_rect_for_radar(const area_tag_t *tag, area_rect_t *out)
-{
-    /* 边缘门与统计/靠近远离相同，使用用户标定的完整矩形（官方 readTagEvent 示例亦如此） */
-    return area_coords_to_rect(tag, out);
-}
-
-esp_err_t sensor_data_fetch_radar_coord(float *x, float *y, uint8_t *target_count, int8_t *picked_index)
+esp_err_t radar_area_fetch_coord(float *x, float *y, uint8_t *target_count, int8_t *picked_index)
 {
     if (x == NULL || y == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -288,24 +279,9 @@ static esp_err_t area_config_load(void)
     return ESP_OK;
 }
 
-void sensor_data_init(void)
+void radar_area_init(void)
 {
     area_config_load();
-
-    esp_err_t err = stcc4_sensor_start();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "STCC4 init failed: %s", esp_err_to_name(err));
-    }
-
-    err = ltr303_sensor_start();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "LTR-303 init failed: %s", esp_err_to_name(err));
-    }
-
-    err = sc7a20h_sensor_start();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SC7A20H init failed: %s", esp_err_to_name(err));
-    }
 
     if (s_area_config.enabled) {
         if (xTaskCreate(c4004_boot_task, "c4004_boot", C4004_BOOT_TASK_STACK, NULL, 3, NULL) != pdPASS) {
@@ -314,31 +290,16 @@ void sensor_data_init(void)
     }
 }
 
-esp_err_t sensor_data_get_snapshot(sensor_snapshot_t *out)
+esp_err_t radar_area_get_status(area_status_t areas[AREA_TAG_MAX], uint8_t *out_count)
 {
-    if (out == NULL) {
+    if (areas == NULL || out_count == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    memset(out, 0, sizeof(*out));
-
-    if (stcc4_sensor_get(&out->temperature, &out->humidity, &out->co2) == ESP_OK) {
-        out->env_ready = true;
-    }
-
-    if (ltr303_sensor_get(&out->lux) == ESP_OK) {
-        out->lux_ready = true;
-    }
-
-    if (sc7a20h_sensor_get(&out->ax, &out->ay, &out->az) == ESP_OK) {
-        out->accel_ready = true;
-    }
-
+    *out_count = 0;
     if (!s_area_config.enabled || s_area_config.tag_count == 0) {
         return ESP_OK;
     }
-
-    out->area_count = s_area_config.tag_count;
 
     if (c4004_sensor_is_ready()) {
         (void)c4004_sensor_refresh_targets();
@@ -346,8 +307,9 @@ esp_err_t sensor_data_get_snapshot(sensor_snapshot_t *out)
 
     for (uint8_t i = 0; i < s_area_config.tag_count; i++) {
         const area_tag_t *tag = &s_area_config.tags[i];
-        area_status_t *st = &out->areas[i];
+        area_status_t *st = &areas[i];
 
+        memset(st, 0, sizeof(*st));
         strncpy(st->name, tag->name, AREA_TAG_NAME_LEN - 1);
         st->strategy = tag->strategy;
 
@@ -357,11 +319,13 @@ esp_err_t sensor_data_get_snapshot(sensor_snapshot_t *out)
 
         if (tag->strategy == 1 && c4004_sensor_is_ready()) {
             area_rect_t rect = {0};
-            if (area_coords_to_rect_for_radar(tag, &rect) == ESP_OK) {
+            if (area_coords_to_rect(tag, &rect) == ESP_OK) {
                 (void)c4004_sensor_refine_people_count(i, &rect, st);
             }
         }
     }
+
+    *out_count = s_area_config.tag_count;
     return ESP_OK;
 }
 
@@ -401,7 +365,7 @@ esp_err_t area_config_add_tag(const area_tag_t *tag)
     }
 
     area_rect_t rect = {0};
-    area_coords_to_rect_for_radar(tag, &rect);
+    area_coords_to_rect(tag, &rect);
     ESP_LOGI(TAG, "add tag \"%s\" strategy=%u rect %ux%u cm at (%d,%d)",
              tag->name, tag->strategy,
              (unsigned)rect.width, (unsigned)rect.height,

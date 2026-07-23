@@ -1,10 +1,11 @@
-const PANELS = ["dataPanel", "configPanel", "wifiPanel"];
+const PANELS = ["dataPanel", "configPanel", "wifiPanel", "otaPanel"];
 const DATA_REFRESH_MS = 500;
 const WIFI_REFRESH_MS = 10000;
 const TAB_ICONS = {
   dashboard: { active: "/icons/dashboard-active.svg", inactive: "/icons/dashboard.svg" },
   map: { active: "/icons/map-pinned-active.svg", inactive: "/icons/map-pinned.svg" },
   wifi: { active: "/icons/router-active.svg", inactive: "/icons/router.svg" },
+  cpu: { active: "/icons/cpu-active.svg", inactive: "/icons/cpu.svg" },
 };
 const isProvisionMode = location.hostname === "192.168.4.1";
 
@@ -21,6 +22,7 @@ let draftCoords = [[0, 0], [0, 0], [0, 0], [0, 0]];
 let activePanel = "dataPanel";
 let wifiFormDirty = false;
 let wifiFieldsInitialized = false;
+let otaUploading = false;
 
 function showTab(panelId) {
   if (panelId === "configPanel" && !areaConfig.enabled) {
@@ -308,6 +310,9 @@ async function loadAreaConfig() {
 }
 
 async function refresh() {
+  if (otaUploading) {
+    return;
+  }
   try {
     const res = await fetch("/api/data", fetchOpts);
     const data = await res.json();
@@ -553,6 +558,119 @@ function setupWifiForm() {
   });
 }
 
+function setOtaMessage(text, type) {
+  const msg = document.getElementById("otaMsg");
+  if (!msg) {
+    return;
+  }
+  msg.innerHTML = text;
+  msg.className = type ? `message-box ${type}` : "message-box";
+}
+
+async function loadOtaInfo() {
+  try {
+    const res = await fetch("/api/ota", fetchOpts);
+    const info = await res.json();
+
+    const versionEl = document.getElementById("otaVersion");
+    const partitionEl = document.getElementById("otaPartition");
+    const noticeEl = document.getElementById("otaPendingNotice");
+    if (versionEl) {
+      versionEl.textContent = info.version || "未知";
+    }
+    if (partitionEl) {
+      partitionEl.textContent = info.running || "--";
+    }
+    if (noticeEl) {
+      noticeEl.classList.toggle("panel-hidden", !info.pending_verify);
+    }
+  } catch (err) {
+    console.error("loadOtaInfo failed:", err);
+  }
+}
+
+function setOtaProgress(percent) {
+  const wrap = document.getElementById("otaProgressWrap");
+  const bar = document.getElementById("otaProgressBar");
+  const text = document.getElementById("otaProgressText");
+  if (!wrap || !bar || !text) {
+    return;
+  }
+  wrap.classList.remove("panel-hidden");
+  const clamped = Math.max(0, Math.min(100, percent));
+  bar.style.width = `${clamped}%`;
+  text.textContent = `${clamped.toFixed(0)}%`;
+}
+
+function uploadFirmware(file) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/ota");
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        setOtaProgress((e.loaded / e.total) * 100);
+      }
+    };
+
+    xhr.onload = () => {
+      let data = {};
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch (err) {
+        data = {};
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && data.ok) {
+        resolve(data);
+      } else {
+        reject(new Error(data.message || `上传失败 (HTTP ${xhr.status})`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("网络错误，上传失败"));
+
+    xhr.send(file);
+  });
+}
+
+function setupOtaForm() {
+  const form = document.getElementById("otaForm");
+  const fileInput = document.getElementById("otaFile");
+  const submitBtn = document.getElementById("otaSubmitBtn");
+  if (!form || !fileInput || !submitBtn) {
+    return;
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) {
+      setOtaMessage("请先选择固件文件 (.bin)", "err");
+      return;
+    }
+    if (!confirm(`确定上传固件 “${file.name}” 并升级设备吗？升级过程中请勿断电。`)) {
+      return;
+    }
+
+    otaUploading = true;
+    submitBtn.disabled = true;
+    fileInput.disabled = true;
+    setOtaProgress(0);
+    setOtaMessage("正在上传固件…", "");
+
+    try {
+      const data = await uploadFirmware(file);
+      setOtaProgress(100);
+      setOtaMessage(data.message || "升级成功，设备即将重启…", "ok");
+    } catch (err) {
+      setOtaMessage(err.message || "升级失败，请重试", "err");
+      otaUploading = false;
+      submitBtn.disabled = false;
+      fileInput.disabled = false;
+    }
+  });
+}
+
 function setupAreaConfig() {
   document.getElementById("enableAreaBtn").addEventListener("click", enableAreaConfig);
   document.getElementById("addTagBtn").addEventListener("click", openTagModal);
@@ -580,9 +698,11 @@ document.querySelectorAll(".tab-button").forEach((btn) => {
 
 setupWifiForm();
 setupAreaConfig();
+setupOtaForm();
 
 loadAreaConfig().then(() => {
   loadWifiStatus();
+  loadOtaInfo();
   startDataPolling();
   setInterval(loadWifiStatus, WIFI_REFRESH_MS);
   showTab(isProvisionMode ? "wifiPanel" : "dataPanel");

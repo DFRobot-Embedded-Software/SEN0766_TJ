@@ -13,7 +13,8 @@ static const char *TAG = "mcp_sensors";
 #include "esp_sntp.h"
 #include "mdns.h"
 #include "mcp_server.h"
-#include "sensor_data.h"
+#include "board_snapshot.h"
+#include "ota_update.h"
 #include "web_fs.h"
 #include "web_server.h"
 #include "wifi_manager.h"
@@ -63,6 +64,7 @@ static void init_time_sync(void)
 
 static void on_wifi_connected(const char *ip_addr)
 {
+    ESP_LOGI(TAG, "boot: phase6 online");
     ESP_LOGI(TAG, "WiFi connected:");
     ESP_LOGI(TAG, "  Web UI: http://%s or http://mcp-sensors.local", ip_addr);
     ESP_LOGI(TAG, "  MCP:    http://%s:%d%s", ip_addr, MCP_HTTP_PORT, MCP_ENDPOINT_URI);
@@ -94,6 +96,9 @@ static void on_wifi_connected(const char *ip_addr)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "static routes register failed: %s", esp_err_to_name(err));
     }
+
+    /* 联网 + 核心服务均已起来，确认本次（可能是 OTA 后的）固件可用，取消回滚保护 */
+    ota_update_mark_valid();
 }
 
 static void on_ap_started(void)
@@ -104,11 +109,59 @@ static void on_ap_started(void)
     web_server_start_provision();
 }
 
+static esp_err_t boot_platform(void)
+{
+    ESP_LOGI(TAG, "boot: phase0 platform");
+    return nvs_storage_init();
+}
+
+static void boot_ui(void)
+{
+    ESP_LOGI(TAG, "boot: phase1 ui");
+    esp_err_t err = ws2812_led_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WS2812 init failed: %s", esp_err_to_name(err));
+    } else {
+        ws2812_show_idle();
+    }
+
+    err = ns4168_amp_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NS4168 init failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void boot_sensors(void)
+{
+    ESP_LOGI(TAG, "boot: phase2 sensors");
+    board_snapshot_init();
+}
+
+static esp_err_t boot_storage(void)
+{
+    ESP_LOGI(TAG, "boot: phase3 storage");
+    return web_fs_init();
+}
+
+static esp_err_t boot_network(void)
+{
+    ESP_LOGI(TAG, "boot: phase4 network");
+    esp_err_t err = wifi_manager_init(on_wifi_connected, on_ap_started);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (!wifi_manager_is_configured()) {
+        web_server_start_provision();
+    }
+    return ESP_OK;
+}
+
 #endif /* !YAMNET_VERIFY_ONLY */
 
 #if CONFIG_YAMNET_ENABLE
-static void start_audio_pipeline(void)
+static void boot_audio(void)
 {
+    ESP_LOGI(TAG, "boot: phase5 audio");
     esp_err_t err = yamnet_classifier_start(NULL, NULL);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "YAMNet start failed: %s", esp_err_to_name(err));
@@ -152,7 +205,7 @@ void app_main(void)
     }
 
 #if CONFIG_YAMNET_ENABLE
-    start_audio_pipeline();
+    boot_audio();
     ESP_LOGI(TAG, "audio pipeline running — watch serial for YAMNet / wake logs");
 #else
     ESP_LOGE(TAG, "Enable CONFIG_YAMNET_ENABLE in menuconfig");
@@ -162,45 +215,30 @@ void app_main(void)
 
     ESP_LOGI(TAG, "MCP Sensors starting...");
 
-    esp_err_t err = nvs_storage_init();
+    esp_err_t err = boot_platform();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(err));
         return;
     }
 
-    err = ws2812_led_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "WS2812 init failed: %s", esp_err_to_name(err));
-    } else {
-        ws2812_show_idle();
-    }
+    boot_ui();
+    boot_sensors();
 
-    err = ns4168_amp_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "NS4168 init failed: %s", esp_err_to_name(err));
-    }
-
-    sensor_data_init();
-
-#if CONFIG_YAMNET_ENABLE
-    start_audio_pipeline();
-#endif
-
-    err = web_fs_init();
+    err = boot_storage();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "web fs init failed: %s", esp_err_to_name(err));
         return;
     }
 
-    err = wifi_manager_init(on_wifi_connected, on_ap_started);
+    err = boot_network();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "wifi init failed: %s", esp_err_to_name(err));
         return;
     }
 
-    if (!wifi_manager_is_configured()) {
-        web_server_start_provision();
-    }
+#if CONFIG_YAMNET_ENABLE
+    boot_audio();
+#endif
 
 #endif /* YAMNET_VERIFY_ONLY */
 }

@@ -4,13 +4,19 @@ set(srcs
     "wifi/captive_portal.c"
     "web/web_server.c"
     "web/web_fs.c"
-    "sensor/sensor_data.c"
+    "sensor/env_sensors.c"
+    "sensor/radar_area.c"
+    "sensor/radar_events.c"
+    "sensor/board_snapshot.c"
     "sensor/stcc4_sensor.c"
     "sensor/ltr303_sensor.c"
     "sensor/sc7a20h_sensor.c"
     "sensor/c4004_sensor.c"
+    "mcp/core/mcp_core.c"
+    "mcp/providers/mcp_provider_env.c"
+    "mcp/providers/mcp_provider_radar.c"
     "mcp/mcp_server.c"
-    "mcp/mcp_radar_events.c"
+    "ota/ota_update.c"
     "led/ws2812_led.c"
     "led/ws2812_fx.c"
     "audio/amp/ns4168_amp.c"
@@ -51,6 +57,9 @@ idf_component_register(
         "web"
         "sensor"
         "mcp"
+        "mcp/core"
+        "mcp/providers"
+        "ota"
         "led"
         "audio/amp"
         "audio/capture"
@@ -63,5 +72,6 @@ idf_component_register(
         espressif__mcp-c-sdk
         esp_timer
         esp_system
+        app_update
     PRIV_REQUIRES ${yamnet_requires} ${led_requires}
 )

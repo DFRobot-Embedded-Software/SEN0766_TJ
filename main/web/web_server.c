@@ -6,9 +6,12 @@
 #include "cJSON.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "sensor_data.h"
+#include "board_snapshot.h"
+#include "ota_update.h"
+#include "radar_area.h"
 #include "web_fs.h"
 #include "captive_portal.h"
 #include "wifi_manager.h"
@@ -141,7 +144,7 @@ static esp_err_t static_file_handler(httpd_req_t *req)
 static esp_err_t api_data_handler(httpd_req_t *req)
 {
     sensor_snapshot_t snapshot = {0};
-    sensor_data_get_snapshot(&snapshot);
+    board_snapshot_get(&snapshot);
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "env_ready", snapshot.env_ready);
@@ -355,7 +358,7 @@ static esp_err_t api_coord_handler(httpd_req_t *req)
     float y = 0.0f;
     uint8_t target_count = 0;
     int8_t picked_index = -1;
-    esp_err_t err = sensor_data_fetch_radar_coord(&x, &y, &target_count, &picked_index);
+    esp_err_t err = radar_area_fetch_coord(&x, &y, &target_count, &picked_index);
 
     cJSON *root = cJSON_CreateObject();
     if (err == ESP_OK) {
@@ -484,6 +487,94 @@ static esp_err_t api_wifi_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+#define OTA_UPLOAD_CHUNK_SIZE 4096
+
+static void ota_reboot_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    esp_restart();
+}
+
+static esp_err_t api_ota_get_handler(httpd_req_t *req)
+{
+    ota_info_t info = {0};
+    ota_update_get_info(&info);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "version", info.version);
+    cJSON_AddStringToObject(root, "running", info.running_label);
+    cJSON_AddBoolToObject(root, "pending_verify", info.pending_verify);
+
+    esp_err_t err = send_json(req, root);
+    cJSON_Delete(root);
+    return err;
+}
+
+/** 前端以原始二进制 POST 整个 .bin（Content-Length 已知，非分块上传） */
+static esp_err_t api_ota_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0) {
+        return send_json_error(req, "400 Bad Request", "请选择固件文件");
+    }
+
+    esp_err_t err = ota_update_begin();
+    if (err != ESP_OK) {
+        return send_json_error(req, "500 Internal Server Error",
+                               err == ESP_ERR_NOT_FOUND ? "没有可用的 OTA 分区" : "OTA 初始化失败");
+    }
+
+    uint8_t *buf = malloc(OTA_UPLOAD_CHUNK_SIZE);
+    if (buf == NULL) {
+        ota_update_abort();
+        return send_json_error(req, "500 Internal Server Error", "内存不足");
+    }
+
+    int remaining = (int)req->content_len;
+    bool write_failed = false;
+    while (remaining > 0) {
+        int to_read = remaining < OTA_UPLOAD_CHUNK_SIZE ? remaining : OTA_UPLOAD_CHUNK_SIZE;
+        int received = httpd_req_recv(req, (char *)buf, to_read);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (received <= 0) {
+            write_failed = true;
+            break;
+        }
+        if (ota_update_write(buf, (size_t)received) != ESP_OK) {
+            write_failed = true;
+            break;
+        }
+        remaining -= received;
+    }
+    free(buf);
+
+    if (write_failed) {
+        ota_update_abort();
+        ESP_LOGE(TAG, "OTA upload interrupted (%d bytes remaining)", remaining);
+        return send_json_error(req, "500 Internal Server Error", "上传中断，请重试");
+    }
+
+    err = ota_update_end();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA end failed: %s", esp_err_to_name(err));
+        return send_json_error(req, "400 Bad Request", "固件校验失败，请确认文件正确且完整");
+    }
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    cJSON_AddStringToObject(resp, "message", "升级成功，设备将在数秒后重启…");
+    esp_err_t send_err = send_json(req, resp);
+    cJSON_Delete(resp);
+
+    ESP_LOGI(TAG, "OTA success, rebooting shortly");
+    if (xTaskCreate(ota_reboot_task, "ota_reboot", 2048, NULL, 5, NULL) != pdPASS) {
+        esp_restart();
+    }
+    return send_err;
+}
+
 static esp_err_t captive_redirect_handler(httpd_req_t *req, httpd_err_code_t err)
 {
     (void)err;
@@ -502,6 +593,8 @@ static void register_api_handlers(void)
     httpd_uri_t coord = {.uri = "/api/coord", .method = HTTP_GET, .handler = api_coord_handler};
     httpd_uri_t wifi_get = {.uri = "/api/wifi", .method = HTTP_GET, .handler = api_wifi_get_handler};
     httpd_uri_t wifi = {.uri = "/api/wifi", .method = HTTP_POST, .handler = api_wifi_post_handler};
+    httpd_uri_t ota_get = {.uri = "/api/ota", .method = HTTP_GET, .handler = api_ota_get_handler};
+    httpd_uri_t ota_post = {.uri = "/api/ota", .method = HTTP_POST, .handler = api_ota_post_handler};
 
     httpd_register_uri_handler(s_server, &data);
     httpd_register_uri_handler(s_server, &cfg_get);
@@ -509,6 +602,8 @@ static void register_api_handlers(void)
     httpd_register_uri_handler(s_server, &coord);
     httpd_register_uri_handler(s_server, &wifi_get);
     httpd_register_uri_handler(s_server, &wifi);
+    httpd_register_uri_handler(s_server, &ota_get);
+    httpd_register_uri_handler(s_server, &ota_post);
 }
 
 static esp_err_t start_server(const char *index_page, bool provision_mode)
@@ -526,7 +621,7 @@ static esp_err_t start_server(const char *index_page, bool provision_mode)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 32;
-    config.stack_size = 8192;
+    config.stack_size = 10240;
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.lru_purge_enable = true;
 

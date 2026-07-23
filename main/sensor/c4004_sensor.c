@@ -618,7 +618,7 @@ static esp_err_t build_tags_payload(const area_config_t *cfg, uint16_t *out_len)
     for (uint8_t i = 0; i < cfg->tag_count; i++) {
         const area_tag_t *tag = &cfg->tags[i];
         area_rect_t rect = {0};
-        esp_err_t rect_err = area_coords_to_rect_for_radar(tag, &rect);
+        esp_err_t rect_err = area_coords_to_rect(tag, &rect);
         if (rect_err != ESP_OK) {
             ESP_LOGE(TAG, "tag[%u] \"%s\" rect invalid: %s",
                      i, tag->name, esp_err_to_name(rect_err));

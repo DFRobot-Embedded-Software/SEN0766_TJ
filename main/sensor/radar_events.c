@@ -1,12 +1,12 @@
 /**
- * @file mcp_radar_events.c
+ * @file radar_events.c
  * @brief C4004 区域事件检测
  *
  * 事件写入环形缓冲区，read 时附带当前 area_config 中的区域列表。
- * 用户通过 Web 增删区域后无需改代码，resources/list 由 mcp_server 动态同步。
+ * 用户通过 Web 增删区域后无需改代码，resources/list 由 mcp_provider_radar 动态同步。
  */
 
-#include "mcp_radar_events.h"
+#include "radar_events.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -21,10 +21,10 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "radar_area.h"
 #include "sdkconfig.h"
-#include "sensor_data.h"
 
-static const char *TAG = "mcp_events";
+static const char *TAG = "radar_events";
 
 #define EVENT_MSG_LEN 160
 #define EVENT_JSON_MAX 384
@@ -64,7 +64,7 @@ static SemaphoreHandle_t s_lock;
 static QueueHandle_t s_notify_queue;
 static TaskHandle_t s_watch_task;
 static TaskHandle_t s_notify_task;
-static mcp_radar_event_notify_cb s_notify_cb;
+static radar_event_notify_cb s_notify_cb;
 static bool s_running;
 static bool s_room_was_occupied;
 static TickType_t s_post_room_empty_guard_until;
@@ -74,9 +74,10 @@ static tag_track_t s_tag_track[AREA_TAG_MAX];
 static bool s_room_empty_pending;
 static bool s_vacated_area_notify[AREA_TAG_MAX];
 
-/** 仅 watch 任务使用，避免 area_config_t + sensor_snapshot_t (~2KB) 占任务栈 */
+/** 仅 watch 任务使用，避免占任务栈 */
 static area_config_t s_poll_cfg;
-static sensor_snapshot_t s_poll_snap;
+static area_status_t s_poll_areas[AREA_TAG_MAX];
+static uint8_t s_poll_area_count;
 
 #define MCP_RADAR_WATCH_STACK  8192
 #define MCP_RADAR_NOTIFY_STACK 4096
@@ -117,20 +118,20 @@ static void append_areas_array(cJSON *root, const area_config_t *cfg)
 
 static void get_tag_people_count(uint8_t idx,
                                  const area_config_t *cfg,
-                                 const sensor_snapshot_t *snap,
+                                 const area_status_t *areas,
                                  int *active,
                                  int *static_count)
 {
     const area_tag_t *tag = &cfg->tags[idx];
 
     if (tag->strategy == 1) {
-        *active = snap->areas[idx].active;
-        *static_count = snap->areas[idx].static_count;
+        *active = areas[idx].active;
+        *static_count = areas[idx].static_count;
         return;
     }
 
     area_rect_t rect = {0};
-    if (area_coords_to_rect_for_radar(tag, &rect) == ESP_OK) {
+    if (area_coords_to_rect(tag, &rect) == ESP_OK) {
         if (c4004_sensor_count_targets_in_rect(&rect, active, static_count) != ESP_OK) {
             *active = 0;
             *static_count = 0;
@@ -142,7 +143,7 @@ static void get_tag_people_count(uint8_t idx,
     *static_count = 0;
 }
 
-static bool is_room_occupied(const area_config_t *cfg, const sensor_snapshot_t *snap)
+static bool is_room_occupied(const area_config_t *cfg, const area_status_t *areas)
 {
     if (cfg->tag_count == 0) {
         return false;
@@ -151,7 +152,7 @@ static bool is_room_occupied(const area_config_t *cfg, const sensor_snapshot_t *
     for (uint8_t i = 0; i < cfg->tag_count; i++) {
         int active = 0;
         int static_count = 0;
-        get_tag_people_count(i, cfg, snap, &active, &static_count);
+        get_tag_people_count(i, cfg, areas, &active, &static_count);
         if (active + static_count > 0) {
             return true;
         }
@@ -207,7 +208,7 @@ static bool emit_room_empty(bool notify)
     cJSON_AddStringToObject(json, "timestamp", ts);
     cJSON_AddStringToObject(json, "message", "房间无人");
 
-    if (!push_event(MCP_EVENT_AREA_ID_GLOBAL, json, notify)) {
+    if (!push_event(RADAR_EVENT_AREA_ID_GLOBAL, json, notify)) {
         cJSON_Delete(json);
         return false;
     }
@@ -304,7 +305,7 @@ static bool event_visible_in_area_feed(const event_record_t *rec, uint8_t area_i
     if (rec->area_id == area_id) {
         return true;
     }
-    if (rec->area_id != MCP_EVENT_AREA_ID_GLOBAL) {
+    if (rec->area_id != RADAR_EVENT_AREA_ID_GLOBAL) {
         return false;
     }
     /* room_empty 同步出现在各区域 feed，便于只订阅 sensor://area/{id}/events 的客户端 */
@@ -511,7 +512,7 @@ static void flush_pending_room_empty(const area_config_t *cfg, bool room_occupie
         return;
     }
 
-    notify_immediate(MCP_EVENT_AREA_ID_GLOBAL);
+    notify_immediate(RADAR_EVENT_AREA_ID_GLOBAL);
     for (uint8_t i = 0; i < cfg->tag_count && i < AREA_TAG_MAX; i++) {
         if (s_vacated_area_notify[i]) {
             notify_immediate(i);
@@ -526,7 +527,7 @@ static void flush_pending_room_empty(const area_config_t *cfg, bool room_occupie
 /**
  * 房间由有人→无人（边沿）：本 poll 只补 area_exit 并 notify；room_empty 下一 poll。
  */
-static void handle_room_just_vacated(const area_config_t *cfg, const sensor_snapshot_t *snap)
+static void handle_room_just_vacated(const area_config_t *cfg, const area_status_t *areas)
 {
     const TickType_t now = xTaskGetTickCount();
     bool any_exit = false;
@@ -542,7 +543,7 @@ static void handle_room_just_vacated(const area_config_t *cfg, const sensor_snap
 
         int active = 0;
         int static_count = 0;
-        get_tag_people_count(i, cfg, snap, &active, &static_count);
+        get_tag_people_count(i, cfg, areas, &active, &static_count);
         const area_tag_t *tag = &cfg->tags[i];
         const int to_emit = reported > 0 ? reported : 1;
 
@@ -572,7 +573,7 @@ static void handle_room_just_vacated(const area_config_t *cfg, const sensor_snap
 static void process_strategy1_crossing(uint8_t i,
                                        const area_tag_t *tag,
                                        const area_config_t *cfg,
-                                       const sensor_snapshot_t *snap,
+                                       const area_status_t *areas,
                                        TickType_t now,
                                        TickType_t debounce,
                                        bool room_occupied,
@@ -583,7 +584,7 @@ static void process_strategy1_crossing(uint8_t i,
     tag_track_t *track = &s_tag_track[i];
     int active = 0;
     int static_count = 0;
-    get_tag_people_count(i, cfg, snap, &active, &static_count);
+    get_tag_people_count(i, cfg, areas, &active, &static_count);
     const int current = active + static_count;
 
     if (track->pending_total != current) {
@@ -657,12 +658,12 @@ static void queue_area_notify(uint8_t area_id)
     }
 }
 
-static void process_snapshot(const area_config_t *cfg, const sensor_snapshot_t *snap)
+static void process_snapshot(const area_config_t *cfg, const area_status_t *areas)
 {
     const TickType_t now = xTaskGetTickCount();
     const TickType_t dwell_ticks = pdMS_TO_TICKS(CONFIG_MCP_RADAR_DWELL_MS);
     const TickType_t debounce = pdMS_TO_TICKS(CONFIG_MCP_RADAR_OCC_DEBOUNCE_MS);
-    const bool room_occupied = is_room_occupied(cfg, snap);
+    const bool room_occupied = is_room_occupied(cfg, areas);
     const bool just_vacated = s_room_was_occupied && !room_occupied;
     bool exit_emitted = false;
     uint8_t exit_area_id = UINT8_MAX;
@@ -671,7 +672,7 @@ static void process_snapshot(const area_config_t *cfg, const sensor_snapshot_t *
     flush_pending_room_empty(cfg, room_occupied);
 
     if (just_vacated) {
-        handle_room_just_vacated(cfg, snap);
+        handle_room_just_vacated(cfg, areas);
         return;
     }
 
@@ -682,12 +683,12 @@ static void process_snapshot(const area_config_t *cfg, const sensor_snapshot_t *
 
     for (uint8_t i = 0; i < cfg->tag_count; i++) {
         const area_tag_t *tag = &cfg->tags[i];
-        const area_status_t *st = &snap->areas[i];
+        const area_status_t *st = &areas[i];
         tag_track_t *track = &s_tag_track[i];
 
         int active = 0;
         int static_count = 0;
-        get_tag_people_count(i, cfg, snap, &active, &static_count);
+        get_tag_people_count(i, cfg, areas, &active, &static_count);
 
         if (tag->strategy == 2) {
             if (st->enter && !track->last_enter) {
@@ -705,7 +706,7 @@ static void process_snapshot(const area_config_t *cfg, const sensor_snapshot_t *
             track->last_enter = st->enter;
             track->last_exit = st->exit;
         } else if (tag->strategy == 1) {
-            process_strategy1_crossing(i, tag, cfg, snap, now, debounce, room_occupied,
+            process_strategy1_crossing(i, tag, cfg, areas, now, debounce, room_occupied,
                                        &area_notify[i], &exit_emitted, &exit_area_id);
         }
 
@@ -752,8 +753,8 @@ static void radar_events_watch_task(void *arg)
     while (s_running) {
         if (area_config_get(&s_poll_cfg) == ESP_OK &&
             s_poll_cfg.enabled && s_poll_cfg.tag_count > 0) {
-            if (sensor_data_get_snapshot(&s_poll_snap) == ESP_OK) {
-                process_snapshot(&s_poll_cfg, &s_poll_snap);
+            if (radar_area_get_status(s_poll_areas, &s_poll_area_count) == ESP_OK) {
+                process_snapshot(&s_poll_cfg, s_poll_areas);
             }
         } else {
             s_room_was_occupied = false;
@@ -772,7 +773,7 @@ static void radar_events_notify_task(void *arg)
     (void)arg;
 
     while (s_running) {
-        uint8_t area_id = MCP_EVENT_AREA_ID_GLOBAL;
+        uint8_t area_id = RADAR_EVENT_AREA_ID_GLOBAL;
         if (xQueueReceive(s_notify_queue, &area_id, pdMS_TO_TICKS(200)) != pdTRUE) {
             continue;
         }
@@ -782,7 +783,7 @@ static void radar_events_notify_task(void *arg)
     }
 
     /* 排空队列中剩余通知后再退出 */
-    uint8_t area_id = MCP_EVENT_AREA_ID_GLOBAL;
+    uint8_t area_id = RADAR_EVENT_AREA_ID_GLOBAL;
     while (xQueueReceive(s_notify_queue, &area_id, 0) == pdTRUE) {
         if (s_notify_cb != NULL) {
             s_notify_cb(area_id);
@@ -793,7 +794,7 @@ static void radar_events_notify_task(void *arg)
     vTaskDelete(NULL);
 }
 
-void mcp_radar_events_reset_state(void)
+void radar_events_reset_state(void)
 {
     if (s_lock != NULL) {
         xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -810,7 +811,7 @@ void mcp_radar_events_reset_state(void)
     ESP_LOGI(TAG, "radar event tracking reset (area config changed)");
 }
 
-void mcp_radar_events_clear_log(void)
+void radar_events_clear_log(void)
 {
     if (s_lock != NULL) {
         xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -824,7 +825,7 @@ void mcp_radar_events_clear_log(void)
     ESP_LOGI(TAG, "radar event log cleared (area config changed)");
 }
 
-esp_err_t mcp_radar_events_start(mcp_radar_event_notify_cb notify_cb)
+esp_err_t radar_events_start(radar_event_notify_cb notify_cb)
 {
     if (s_running) {
         return ESP_OK;
@@ -840,7 +841,7 @@ esp_err_t mcp_radar_events_start(mcp_radar_event_notify_cb notify_cb)
     memset(s_event_log, 0, sizeof(s_event_log));
     s_event_log_next = 0;
     s_event_log_count = 0;
-    mcp_radar_events_reset_state();
+    radar_events_reset_state();
     s_notify_cb = notify_cb;
     s_running = true;
 
@@ -876,7 +877,7 @@ esp_err_t mcp_radar_events_start(mcp_radar_event_notify_cb notify_cb)
     return ESP_OK;
 }
 
-void mcp_radar_events_stop(void)
+void radar_events_stop(void)
 {
     if (!s_running) {
         return;
@@ -889,7 +890,7 @@ void mcp_radar_events_stop(void)
     s_notify_cb = NULL;
 }
 
-esp_err_t mcp_radar_events_read_feed(char **out_json)
+esp_err_t radar_events_read_feed(char **out_json)
 {
     if (out_json == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -910,7 +911,7 @@ esp_err_t mcp_radar_events_read_feed(char **out_json)
     return ESP_OK;
 }
 
-esp_err_t mcp_radar_events_read_area(uint8_t area_id, char **out_json)
+esp_err_t radar_events_read_area(uint8_t area_id, char **out_json)
 {
     if (out_json == NULL) {
         return ESP_ERR_INVALID_ARG;

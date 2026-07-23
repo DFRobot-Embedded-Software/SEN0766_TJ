@@ -66,6 +66,10 @@
     <img src="/icons/router.svg" alt="WiFi配置图标" class="tab-icon"/>
     <span>WiFi 配置</span>
   </button>
+  <button type="button" data-panel="otaPanel" data-icon="cpu" class="tab-button">
+    <img src="/icons/cpu.svg" alt="固件升级图标" class="tab-icon"/>
+    <span>固件升级</span>
+  </button>
 </div>
 </nav>
 <section id="dataPanel" data-panel="0">
@@ -286,6 +290,76 @@
           <p class="tip-text">设备找不到已保存的 WiFi 时，约 10 秒后自动开启热点 <b>MCP-Sensors-Setup</b>，连接后访问 http://192.168.4.1 即可更换网络。</p>
         </div>
         <p id="wifiTip" class="tip-footer">如连接失败，请检查路由器名称、密码、加密方式及信号覆盖情况。</p>
+      </div>
+    </div>
+  </aside>
+</div>
+</section>
+<section id="otaPanel" data-panel="3" class="panel-hidden">
+  <div class="wifi-grid">
+    <div class="gjs-t-border wifi-form-card">
+      <div class="wifi-header">
+        <div class="wifi-icon-wrap">
+          <img src="/icons/cpu.svg" alt="固件图标" class="wifi-icon"/>
+        </div>
+        <div class="wifi-heading">
+          <h2 class="gjs-t-h2 font-heading wifi-title">固件在线升级</h2>
+          <p class="wifi-description">选择编译好的 .bin 固件文件，上传后设备将自动校验并重启。</p>
+        </div>
+      </div>
+      <div class="ota-version-row">
+        <div class="ota-version-item">
+          <span class="ota-version-label">当前版本</span>
+          <strong id="otaVersion" class="ota-version-value">--</strong>
+        </div>
+        <div class="ota-version-item">
+          <span class="ota-version-label">运行分区</span>
+          <strong id="otaPartition" class="ota-version-value">--</strong>
+        </div>
+      </div>
+      <div id="otaPendingNotice" class="ota-pending-notice panel-hidden">
+        当前固件处于回滚待验证状态，联网成功后会自动确认；若反复重启将自动回退到上一版本。
+      </div>
+      <form id="otaForm" class="wifi-form">
+        <div class="form-field">
+          <label for="otaFile" class="form-label">固件文件 (.bin)</label>
+          <input type="file" id="otaFile" accept=".bin" class="gjs-t-border ota-file-input"/>
+        </div>
+        <div id="otaProgressWrap" class="ota-progress-wrap panel-hidden">
+          <div class="ota-progress-track">
+            <div id="otaProgressBar" class="ota-progress-bar"></div>
+          </div>
+          <span id="otaProgressText" class="ota-progress-text">0%</span>
+        </div>
+        <div class="submit-row">
+          <button type="submit" id="otaSubmitBtn" class="primary-button">
+          <img src="/icons/upload.svg" alt="上传图标" class="button-icon"/>
+          <span>开始升级</span>
+        </button>
+        <div id="otaMsg" class="message-box">
+        </div>
+      </div>
+    </form>
+  </div>
+  <aside class="gjs-t-border wifi-info-card">
+    <div class="info-content">
+      <div class="info-panel">
+        <div class="info-header">
+          <img src="/icons/shield-check.svg" alt="安全图标" class="info-icon"/>
+          <strong class="info-title">升级说明</strong>
+        </div>
+        <p class="info-text">升级过程中请勿断电或关闭本页面，上传完成后设备会自动重启并切换到新固件。</p>
+      </div>
+      <div class="tip-list">
+        <div class="tip-item">
+          <div class="tip-title">双槽保护</div>
+          <p class="tip-text">设备使用双固件分区，新固件先写入备用分区并校验通过后才会切换启动，原固件保持不变。</p>
+        </div>
+        <div class="tip-item">
+          <div class="tip-title">失败自动回退</div>
+          <p class="tip-text">新固件启动后若未能成功联网/启动服务，重启后会自动回退到升级前的固件，无需手动干预。</p>
+        </div>
+        <p class="tip-footer">重启后请稍等约 10~20 秒，再刷新本页面确认新版本号。</p>
       </div>
     </div>
   </aside>

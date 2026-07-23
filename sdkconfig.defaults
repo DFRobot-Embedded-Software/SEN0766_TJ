@@ -1,6 +1,9 @@
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="config/partitions.csv"
 
+# OTA：双槽升级 + 回滚保护（新固件联网成功前不标记为有效，异常时自动回退）
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
 # P4 必须使用 ESP-Hosted，不能开启 Host WiFi
 # CONFIG_ESP_HOST_WIFI_ENABLED is not set
 

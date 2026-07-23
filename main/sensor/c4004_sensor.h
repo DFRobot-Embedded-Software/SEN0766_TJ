@@ -6,7 +6,7 @@
 #pragma once
 
 #include "esp_err.h"
-#include "sensor_data.h"
+#include "radar_area.h"
 #include <stdbool.h>
 #include <stdint.h>
 

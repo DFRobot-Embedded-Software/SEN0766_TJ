@@ -143,6 +143,45 @@ idf.py -p COMx flash monitor
 
 将 `COMx` 替换为实际串口号（设备管理器中查看）。
 
+### 启动顺序（完整应用）
+
+串口可见 `boot: phaseN ...`：
+
+0. **platform** — NVS  
+1. **ui** — WS2812 + NS4168  
+2. **sensors** — I2C0（STCC4/LTR/SC7A20H）+ 可选 C4004  
+3. **storage** — SPIFFS  
+4. **network** — WiFi / Hosted（不等 IP）  
+5. **audio** — capture + YAMNet / wake / stream  
+6. **online**（got IP）— mDNS、SNTP、MCP、Web Dashboard  
+
+VERIFY_ONLY：仅 UI + audio。
+
+### MCP 框架（`:8080`）与传感器领域层分层
+
+```text
+mcp/core/            传输与生命周期，纯框架，不认识任何传感器
+mcp/providers/env     薄适配器：调 board_snapshot，暴露 sensors.get_snapshot + sensor://temperature
+mcp/providers/radar    薄适配器：调 radar_area + radar_events，暴露区域工具 + sensor://events
+mcp/mcp_server.c      板级入口：注册 env+radar 后 mcp_core_start()
+
+sensor/env_sensors.c/h     纯环境：STCC4(温湿度/CO2) + LTR-303(光照) + SC7A20H(加速度)
+sensor/radar_area.c/h      区域配置(NVS)、四点坐标→矩形几何、C4004 生命周期
+sensor/radar_events.c/h    区域进出/停留事件状态机（纯领域逻辑，不知道 MCP/HTTP 是什么）
+sensor/board_snapshot.c/h  组合 env_sensors + radar_area，供 Web /api/data 与 MCP env provider 共用
+```
+
+分层原则：**mcp/ 只做协议适配，业务逻辑都在 sensor/**。Provider 文件里不应该出现状态机、几何计算、NVS 读写——如果新写的 provider 变胖了，说明该把逻辑挪回 `sensor/`。
+
+新增传感器：实现 `mcp_sensor_provider_t` → `mcp_core_add_provider` → **不改 core**。  
+WebUI 仍在 `spiffs/`，与 MCP 独立；改前端后 `idf.py spiffs-flash` 即可。
+
+### 调试顺序（由底向上）
+
+1. UI（灯/功放）→ 2. I2C0 三传感器 → 3. C4004 → 4. ES7210 采集 → 5. YAMNet/唤醒 → 6. WiFi → 7. Web `/api/data` → 8. MCP tools/resources  
+
+一次只开一层相关功能，缩小 menuconfig 范围。
+
 常用命令：
 
 ```powershell
@@ -341,10 +380,21 @@ mcp_sensors/
 │   ├── web/                    # HTTP 服务与 SPIFFS 文件系统
 │   │   ├── web_server.c/h
 │   │   └── web_fs.c/h
-│   ├── sensor/                 # 传感器数据与区域配置
-│   │   ├── sensor_data.c/h
-│   │   ├── stcc4_sensor.c/h    # STCC4 I2C 驱动封装
-│   │   └── c4004_sensor.c/h    # C4004 UART 驱动封装
+│   ├── sensor/                 # 传感器领域逻辑（与 mcp/web 协议无关）
+│   │   ├── env_sensors.c/h        # 温湿度/CO2/光照/加速度聚合
+│   │   ├── radar_area.c/h         # 区域配置(NVS) + 几何 + C4004 生命周期
+│   │   ├── radar_events.c/h       # 区域进出/停留事件状态机
+│   │   ├── board_snapshot.c/h     # env+radar 组合快照（Web /api/data 用）
+│   │   ├── stcc4_sensor.c/h       # STCC4 I2C 驱动封装
+│   │   ├── ltr303_sensor.c/h      # LTR-303 I2C 驱动封装
+│   │   ├── sc7a20h_sensor.c/h     # SC7A20H I2C 驱动封装
+│   │   └── c4004_sensor.c/h       # C4004 UART 驱动封装
+│   ├── mcp/                    # MCP 框架 + Provider 适配层（见上）
+│   │   ├── core/
+│   │   ├── providers/
+│   │   └── mcp_server.c/h
+│   ├── ota/                    # OTA 固件升级（封装 esp_ota_ops）
+│   │   └── ota_update.c/h
 │   ├── CMakeLists.txt
 │   └── idf_component.yml       # 组件管理器依赖
 ├── spiffs/                     # Web 静态资源（打包进 SPIFFS 分区）
@@ -371,6 +421,42 @@ mcp_sensors/
 | POST | `/api/config` | 保存区域配置 |
 | GET | `/api/wifi` | 当前 WiFi 配置与连接状态 |
 | POST | `/api/wifi` | 保存 WiFi 并连接 |
+| GET | `/api/ota` | 当前固件版本 / 运行分区 / 回滚待验证状态 |
+| POST | `/api/ota` | 上传固件 `.bin`（原始二进制 body），成功后自动重启 |
+
+## 固件在线升级（OTA）
+
+### 修改固件版本号
+
+版本号来自项目根目录的 **`version.txt`**（纯文本，写版本号如 `1.0.1`），会显示在 Web
+监控页"固件升级"标签页的"当前版本"里，也就是 `esp_app_desc_t.version`。每次发版本前改一下
+这个文件即可，改完执行 `idf.py build` 生效（不需要打 git tag）。
+
+> 若删除 `version.txt`，ESP-IDF 会退回用 `git describe` 自动生成版本号（形如 `<commit>-dirty`），
+> 不便于识别，不建议。
+
+固件采用双 OTA 槽（`ota_0` / `ota_1` + `otadata`），在 Web 监控页的 **固件升级** 标签页里选择编译好的
+`build/mcp_sensors.bin` 上传即可，无需连接电脑或串口：
+
+1. `idf.py build` 生成 `build/mcp_sensors.bin`（就是同一份固件，flash 到当前未运行的那个 OTA 槽）。
+2. 浏览器打开 `http://mcp-sensors.local` → **固件升级** → 选择 `.bin` → 开始升级。
+3. 设备边接收边写入备用分区，完成后校验镜像 → 切到新分区 → 自动重启（约 1.5s 后）。
+4. 新固件启动后若能正常联网并起 Web/MCP 服务，会自动确认为有效版本（取消回滚）；
+   若反复重启失败，下次开机会**自动回退**到升级前的固件（App Rollback，`sdkconfig` 中
+   `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`）。
+
+升级过程中请勿断电；同一局域网内即可完成，不依赖外网。
+
+**⚠️ 破坏性变更提醒**：本次为支持 OTA 将分区表从单一 `factory` 分区改为 `ota_0`/`ota_1` 双槽
+（见 `config/partitions.csv`）。**已用旧分区表烧录过的设备，必须先执行一次完整擦除重刷**，
+否则旧设备上的分区偏移与新分区表不匹配：
+
+```powershell
+idf.py erase-flash
+idf.py flash
+```
+
+之后再升级就都可以走 Web OTA，不必再连电脑。
 
 ## 常见问题
 
