@@ -1,405 +1,392 @@
-menu "WS2812 彩灯"
+#
+# mcp_sensors 板级配置
+#
+# 总线一览（改引脚前先看这里，避免冲突）：
+#
+#   I2C0  ── STCC4(0x64) + LTR-303(0x29) + SC7A20H(0x18/0x19)
+#   I2C1  ── ES7210 ADC(0x40)
+#   I2S0  ── ES7210 录音 RX（BCLK/WS/DIN/MCLK）
+#   I2S1  ── NS4168 功放 TX（BCLK/WS/DOUT）
+#   UART1 ── C4004 毫米波
+#   RMT   ── WS2812
+#
 
-    config WS2812_ENABLE
-        bool "启用 WS2812 灯带"
-        default y
-        help
-            使用 RMT 驱动 WS2812/SK6812。数据线默认 GPIO21。
+menu "1. 板级总线与传感器"
 
-    config WS2812_GPIO
-        int "数据线 GPIO"
-        depends on WS2812_ENABLE
-        default 21
+    comment "I2C0：环境传感器共用总线（STCC4 / LTR-303 / SC7A20H）"
+
+    config SENSOR_I2C0_SDA
+        int "I2C0 SDA GPIO"
+        default 1
         range 0 54
+        help
+            STCC4、LTR-303、SC7A20H 共用。当前板默认 GPIO1。
 
-    config WS2812_LED_COUNT
-        int "灯珠数量"
-        depends on WS2812_ENABLE
-        default 1
-        range 1 64
+    config SENSOR_I2C0_SCL
+        int "I2C0 SCL GPIO"
+        default 0
+        range 0 54
+        help
+            当前板默认 GPIO0。
+
+    menu "STCC4 CO2 / 温湿度"
+        config STCC4_I2C_ADDR
+            hex "I2C 7-bit 地址"
+            default 0x64
+            help
+                DFRobot STCC4 默认 0x64，跳线可改为 0x65。
+
+        config STCC4_POLL_INTERVAL_MS
+            int "采样间隔 (ms)"
+            default 1000
+            range 500 60000
+    endmenu
+
+    menu "LTR-303ALS-01 环境光"
+        config LTR303_ENABLE
+            bool "启用"
+            default y
+            help
+                地址固定 0x29，挂在 I2C0。
+
+        config LTR303_POLL_INTERVAL_MS
+            int "采样间隔 (ms)"
+            depends on LTR303_ENABLE
+            default 1000
+            range 200 60000
+    endmenu
+
+    menu "SC7A20H 加速度计"
+        config SC7A20H_ENABLE
+            bool "启用"
+            default y
+            help
+                LIS2DH 兼容；WHO_AM_I=0x11。挂在 I2C0。
+
+        config SC7A20H_I2C_ADDR
+            hex "首选 I2C 7-bit 地址"
+            depends on SC7A20H_ENABLE
+            default 0x19
+            help
+                SA0=1 → 0x19；探测失败再试 0x18。
+
+        config SC7A20H_POLL_INTERVAL_MS
+            int "采样间隔 (ms)"
+            depends on SC7A20H_ENABLE
+            default 200
+            range 50 60000
+    endmenu
+
+    menu "C4004 毫米波雷达 (UART)"
+        config C4004_UART_PORT
+            int "UART 端口号"
+            default 1
+            range 0 2
+
+        config C4004_UART_TX
+            int "TX GPIO（接模块 RX）"
+            default 50
+
+        config C4004_UART_RX
+            int "RX GPIO（接模块 TX）"
+            default 51
+
+        config C4004_UART_BAUD
+            int "波特率"
+            default 115200
+
+        config C4004_AUTO_RECOVER_ENABLE
+            bool "启用自动恢复"
+            default y
+
+        config C4004_AUTO_RECOVER_INTERVAL_MS
+            int "定期 re-sync 间隔 (ms)"
+            depends on C4004_AUTO_RECOVER_ENABLE
+            default 21600000
+            range 300000 86400000
+
+        config C4004_GHOST_RECOVER_COOLDOWN_MS
+            int "假目标恢复冷却 (ms)"
+            depends on C4004_AUTO_RECOVER_ENABLE
+            default 60000
+            range 10000 600000
+    endmenu
+
+    menu "WS2812 彩灯"
+        config WS2812_ENABLE
+            bool "启用"
+            default y
+
+        config WS2812_GPIO
+            int "数据线 GPIO"
+            depends on WS2812_ENABLE
+            default 21
+            range 0 54
+
+        config WS2812_LED_COUNT
+            int "灯珠数量"
+            depends on WS2812_ENABLE
+            default 7
+            range 1 64
+    endmenu
 
 endmenu
 
-menu "STCC4 环境传感器 (DFRobot Gravity)"
+menu "2. 音频硬件 (ES7210 / NS4168)"
 
-    config STCC4_I2C_SDA
-        int "I2C SDA GPIO"
-        default 7
-        help
-            STCC4 模块 SDA 引脚。ESP32-P4-Function-EV-Board 默认为 GPIO7。
+    comment "录音 I2S0 + I2C1；播放 I2S1。勿与传感器 I2C0 混用。"
 
-    config STCC4_I2C_SCL
-        int "I2C SCL GPIO"
-        default 8
+    choice AUDIO_SOURCE
+        prompt "麦克风输入"
+        default AUDIO_SOURCE_ES7210
         help
-            STCC4 模块 SCL 引脚。ESP32-P4-Function-EV-Board 默认为 GPIO8。
+            由 audio_capture 打开硬件；YAMNet / esp-sr / 透传只订阅 PCM。
 
-    config STCC4_I2C_ADDR
-        hex "I2C 地址 (7-bit)"
-        default 0x64
-        help
-            DFRobot STCC4 默认 0x64，跳线可改为 0x65。
+        config AUDIO_SOURCE_ES7210
+            bool "ES7210 ADC"
+        config AUDIO_SOURCE_FAKE
+            bool "Fake 噪声（无硬件）"
+    endchoice
 
-    config STCC4_POLL_INTERVAL_MS
-        int "采样间隔 (ms)"
-        default 1000
-        range 500 60000
+    menu "ES7210 麦克风 (I2C1 + I2S0 RX)"
+        depends on AUDIO_SOURCE_ES7210
+
+        config ES7210_I2C_PORT
+            int "I2C 控制器"
+            default 1
+            range 0 1
+            help
+                传感器占 I2C0，ES7210 默认 I2C1。
+
+        config ES7210_I2C_SDA
+            int "I2C SDA GPIO"
+            default 7
+
+        config ES7210_I2C_SCL
+            int "I2C SCL GPIO"
+            default 8
+
+        config ES7210_I2C_ADDR
+            hex "I2C 7-bit 地址"
+            default 0x40
+            help
+                AD0 接地多为 0x40（codec 侧 8-bit 0x80）。
+
+        config ES7210_MIC_COUNT
+            int "麦克风路数"
+            default 2
+            range 1 2
+            help
+                1=MIC1 mono；2=MIC1+MIC2 立体声后下混 mono。
+
+        config ES7210_MIC_GAIN_DB
+            int "硬件增益 (dB)"
+            default 30
+            range 0 37
+
+        config ES7210_I2S_BCLK
+            int "I2S0 BCLK GPIO"
+            default 29
+
+        config ES7210_I2S_WS
+            int "I2S0 WS/LRCK GPIO"
+            default 27
+
+        config ES7210_I2S_DIN
+            int "I2S0 DIN GPIO（codec→ESP）"
+            default 28
+
+        config ES7210_I2S_USE_MCLK
+            bool "输出 MCLK"
+            default y
+
+        config ES7210_I2S_MCLK
+            int "I2S0 MCLK GPIO"
+            depends on ES7210_I2S_USE_MCLK
+            default 30
+    endmenu
+
+    menu "NS4168 功放 (I2S1 TX)"
+        config NS4168_ENABLE
+            bool "启用"
+            default y
+
+        config NS4168_I2S_PORT
+            int "I2S 控制器"
+            depends on NS4168_ENABLE
+            default 1
+            range 0 2
+            help
+                与 ES7210 的 I2S0 错开，默认 I2S1。
+
+        config NS4168_I2S_BCLK
+            int "BCLK GPIO"
+            depends on NS4168_ENABLE
+            default 33
+
+        config NS4168_I2S_WS
+            int "WS/LRCK GPIO"
+            depends on NS4168_ENABLE
+            default 32
+
+        config NS4168_I2S_DOUT
+            int "DOUT GPIO（ESP→NS4168 DIN）"
+            depends on NS4168_ENABLE
+            default 26
+
+        config NS4168_SAMPLE_RATE
+            int "采样率 (Hz)"
+            depends on NS4168_ENABLE
+            default 16000
+            range 8000 48000
+    endmenu
+
+    config AUDIO_CAPTURE_DIGITAL_GAIN
+        int "采集数字增益倍数"
+        default 4
+        range 1 16
         help
-            STCC4 后台 I2C 采样间隔。Web 页面默认 1 秒刷新，建议与此一致。
+            audio_capture 读出 PCM 后、扇出前对 int16 放大并饱和。
+            与 ES7210 硬件增益叠加。
 
 endmenu
 
-menu "C4004 毫米波雷达 (DFRobot UART)"
-
-    config C4004_UART_PORT
-        int "UART 端口号"
-        default 1
-        range 0 2
-        help
-            ESP32-P4 UART 端口，默认 UART1。
-
-    config C4004_UART_TX
-        int "TX GPIO (接 C4004 RX)"
-        default 50
-        help
-            ESP32 发送引脚，连接 C4004 模块 RX。
-
-    config C4004_UART_RX
-        int "RX GPIO (接 C4004 TX)"
-        default 51
-        help
-            ESP32 接收引脚，连接 C4004 模块 TX。
-
-    config C4004_UART_BAUD
-        int "波特率"
-        default 115200
-        help
-            C4004 默认 115200。
-
-    config C4004_AUTO_RECOVER_ENABLE
-        bool "启用 C4004 自动恢复"
-        default y
-        help
-            长时间运行后雷达可能残留假目标（如静止 1 人），断电可恢复。
-            启用后由后台任务定期 re-sync，或在轨迹与人数矛盾时全量重建标签。
-
-    config C4004_AUTO_RECOVER_INTERVAL_MS
-        int "定期 re-sync 间隔 (ms)"
-        depends on C4004_AUTO_RECOVER_ENABLE
-        default 21600000
-        range 300000 86400000
-        help
-            每隔该时间对 C4004 清空并重建区域标签（默认 6 小时）。
-            过短会占用 UART 导致 MCP 上报卡顿。
-
-    config C4004_GHOST_RECOVER_COOLDOWN_MS
-        int "假目标恢复冷却 (ms)"
-        depends on C4004_AUTO_RECOVER_ENABLE
-        default 60000
-        range 10000 600000
-        help
-            检测到「全局无轨迹但区域人数>0」时触发全量标签重建，
-            两次触发之间的最短间隔。
-
-endmenu
-
-menu "YAMNet 声音事件分类 (TFLite Micro)"
+menu "3. 音频算法 (YAMNet / 唤醒 / 透传)"
 
     config YAMNET_ENABLE
         bool "启用 YAMNet 声音分类"
         default n
         help
-            加载 models/yamnet/yamnet_cry_distill.tflite（INT8，mel 输入），
-            对 16 kHz 音频做推理。需先运行 scripts/fetch_yamnet_model.ps1，并启用 PSRAM。
-            更换模型：覆盖同名 .tflite 后重新 build flash（输入输出约定见 models/yamnet/README.md）。
+            订阅 audio_capture；模型见 models/yamnet/。
 
     config YAMNET_VERIFY_ONLY
-        bool "仅验证 YAMNet（关闭 WiFi/传感器/MCP/Web）"
+        bool "仅验证 YAMNet（关 WiFi/传感器/MCP/Web）"
         depends on YAMNET_ENABLE
         default n
-        help
-            启动后只运行 YAMNet 音频采集 + 推理，串口打印 Top-3 结果。
-            用于隔离调试模型与麦克风，不初始化 STCC4、C4004、WiFi、MCP、Web。
-
-    choice YAMNET_AUDIO_SOURCE
-        prompt "音频输入来源（由 audio_capture 使用）"
-        depends on YAMNET_ENABLE
-        default YAMNET_AUDIO_SOURCE_ES8388
-        help
-            配置项供独立模块 audio_capture 使用，YAMNet 仅订阅 PCM。
-            ES8388：板载/外接 codec 麦克风（推荐）。
-            Fake：合成噪声，仅验证 mel + 推理。
-
-        config YAMNET_AUDIO_SOURCE_ES8388
-            bool "ES8388 codec 麦克风"
-        config YAMNET_AUDIO_SOURCE_FAKE
-            bool "Fake（测试噪声）"
-    endchoice
-
-    config YAMNET_ES8388_SHARE_STCC4_I2C
-        bool "ES8388 与 STCC4 共用 I2C0"
-        depends on YAMNET_AUDIO_SOURCE_ES8388
-        default n
-        help
-            仅当 ES8388 与 STCC4 挂在同一组 SDA/SCL 时开启。
-            两路独立 I2C 时请关闭，并配置下方端口与引脚。
-
-    config YAMNET_ES8388_I2C_PORT
-        int "ES8388 I2C 控制器编号"
-        depends on YAMNET_AUDIO_SOURCE_ES8388 && !YAMNET_ES8388_SHARE_STCC4_I2C
-        default 1
-        range 0 1
-        help
-            STCC4 占用 I2C0 时，ES8388 请用 I2C1。
-
-    config YAMNET_ES8388_I2C_SDA
-        int "ES8388 I2C SDA GPIO"
-        depends on YAMNET_AUDIO_SOURCE_ES8388 && !YAMNET_ES8388_SHARE_STCC4_I2C
-        default 32
-        help
-            必须是 ES8388 实际接线的 SDA，不能填 STCC4 的脚。
-
-    config YAMNET_ES8388_I2C_SCL
-        int "ES8388 I2C SCL GPIO"
-        depends on YAMNET_AUDIO_SOURCE_ES8388 && !YAMNET_ES8388_SHARE_STCC4_I2C
-        default 31
-        help
-            必须是 ES8388 实际接线的 SCL，不能填 STCC4 的脚。
-
-    config YAMNET_ES8388_I2C_ADDR
-        hex "ES8388 I2C 7-bit 地址"
-        depends on YAMNET_AUDIO_SOURCE_ES8388
-        default 0x10
-        help
-            7-bit 地址，用于 I2C 扫描。常见为 0x10（ADDR 脚接地），
-            ADDR 接高时多为 0x11。传给 esp_codec_dev 时会自动转为 8-bit（左移 1 位）。
-
-    config YAMNET_I2S_BCLK
-        int "I2S BCLK GPIO"
-        depends on YAMNET_AUDIO_SOURCE_ES8388
-        default 12
-
-    config YAMNET_I2S_WS
-        int "I2S WS/LRCK GPIO"
-        depends on YAMNET_AUDIO_SOURCE_ES8388
-        default 10
-
-    config YAMNET_I2S_DIN
-        int "I2S DIN GPIO（codec→ESP，录音）"
-        depends on YAMNET_AUDIO_SOURCE_ES8388
-        default 9
-
-    config YAMNET_I2S_DOUT
-        int "I2S DOUT GPIO（-1=不使用）"
-        depends on YAMNET_AUDIO_SOURCE_ES8388
-        default 11
-        help
-            仅录音时可悬空；若驱动要求有引脚，填实际 DOUT。
-            填 -1 表示 I2S_GPIO_UNUSED。
-
-    config YAMNET_I2S_USE_MCLK
-        bool "输出 I2S MCLK"
-        depends on YAMNET_AUDIO_SOURCE_ES8388
-        default y
-        help
-            ES8388 通常需要 MCLK。
-
-    config YAMNET_I2S_MCLK
-        int "I2S MCLK GPIO"
-        depends on YAMNET_I2S_USE_MCLK
-        default 13
-
-    config YAMNET_ES8388_USE_PA
-        bool "使用功放使能脚"
-        depends on YAMNET_AUDIO_SOURCE_ES8388
-        default n
-
-    config YAMNET_ES8388_PA_PIN
-        int "功放使能 GPIO"
-        depends on YAMNET_ES8388_USE_PA
-        default 53
-
-    config YAMNET_ES8388_MIC_GAIN_DB
-        int "麦克风输入增益 (dB)"
-        depends on YAMNET_AUDIO_SOURCE_ES8388
-        default 36
-        range 0 36
-        help
-            由 audio_capture 使用。硬件增益上限 36 dB；远场再调 AUDIO_CAPTURE_DIGITAL_GAIN。
 
     config YAMNET_INFER_MIN_INTERVAL_MS
-        int "两次推理最小间隔 (ms)"
+        int "推理最小间隔 (ms)"
         depends on YAMNET_ENABLE
         range 200 10000
         default 500
-        help
-            cry-distill 单次约几十 ms，默认 500。过短会占满 CPU。
 
     config YAMNET_INFER_HOP_FRAMES
-        int "相邻 patch 间隔帧数 (10ms/帧)"
+        int "相邻 patch 间隔帧 (10ms/帧)"
         depends on YAMNET_ENABLE
         range 48 96
         default 48
-        help
-            48 = 50% 重叠（更跟手）；96 = 无重叠（推理更稀）。
 
     config YAMNET_INFER_RMS_MIN
         int "静音门限 pcm_rms（0=关闭）"
         depends on YAMNET_ENABLE
         range 0 10000
         default 150
-        help
-            RMS 低于该值跳过 Invoke。数字增益后底噪会抬高，远场可再降。
 
     config YAMNET_EVENT_VOTE_WINDOW
-        int "事件投票窗口默认 N（最近 N 次）"
+        int "事件投票窗口 N"
         depends on YAMNET_ENABLE
         range 1 16
         default 5
-        help
-            写入 yamnet_events 表中未单独指定的默认 vote_window（见 audio/yamnet/yamnet_events.c）。
 
     config YAMNET_EVENT_VOTE_NEED
-        int "事件投票默认至少命中次数"
+        int "事件投票最少命中"
         depends on YAMNET_ENABLE
         range 1 16
         default 3
 
     config YAMNET_EVENT_HOLD_MS
-        int "事件告警默认冷却 (ms)"
+        int "事件告警冷却 (ms)"
         depends on YAMNET_ENABLE
         range 500 60000
         default 4000
 
     config YAMNET_LOG_VERBOSE
-        bool "每次推理都打印完整 Top-3"
+        bool "每次推理打印完整 Top-3"
         depends on YAMNET_ENABLE
         default n
-        help
-            关闭时仅在关注事件分数升高或周期性摘要时打印，减少刷屏。
 
     config YAMNET_INFER_TASK_CORE
-        int "推理任务绑定 CPU (-1=不绑定)"
+        int "推理任务绑核 (-1=不绑)"
         depends on YAMNET_ENABLE
         range -1 1
         default -1
-        help
-            绑定 CPU1 时长时间推理可能导致 IDLE1 看门狗超时，建议 -1。
 
     config YAMNET_DISABLE_ESP_NN
-        bool "强制 TFLite reference 内核（极慢，仅调试）"
+        bool "强制 TFLite reference（仅调试）"
         depends on YAMNET_ENABLE
         default n
-        help
-            默认关闭。仅当 ESP-NN 结果异常时再开启。
+
+    menu "ESP-SR 语音唤醒"
+        config ESP_SR_WAKE_ENABLE
+            bool "启用"
+            depends on YAMNET_ENABLE
+            default n
+            help
+                另在 Component config → ESP Speech Recognition 勾选 WakeNet。
+
+        config ESP_SR_WAKE_START_STREAM
+            bool "唤醒后自动 UDP 透传"
+            depends on ESP_SR_WAKE_ENABLE && AUDIO_STREAM_ENABLE
+            default y
+
+        config ESP_SR_WAKE_FETCH_CORE
+            int "AFE fetch 绑核 (-1=不绑)"
+            depends on ESP_SR_WAKE_ENABLE
+            range -1 1
+            default 1
+    endmenu
+
+    menu "UDP PCM 透传"
+        config AUDIO_STREAM_ENABLE
+            bool "启用"
+            depends on YAMNET_ENABLE
+            default n
+
+        config AUDIO_STREAM_UDP_HOST
+            string "目标主机"
+            depends on AUDIO_STREAM_ENABLE
+            default "192.168.1.100"
+
+        config AUDIO_STREAM_UDP_PORT
+            int "目标端口"
+            depends on AUDIO_STREAM_ENABLE
+            default 9000
+            range 1 65535
+
+        config AUDIO_STREAM_MAX_MS
+            int "单次最长时长 (ms)"
+            depends on AUDIO_STREAM_ENABLE
+            default 15000
+            range 1000 120000
+    endmenu
 
 endmenu
 
-menu "音频采集 (audio_capture)"
-
-    config AUDIO_CAPTURE_DIGITAL_GAIN
-        int "数字增益倍数 (采集后、扇出前)"
-        depends on YAMNET_ENABLE
-        default 4
-        range 1 16
-        help
-            独立于 YAMNet/esp-sr/透传。int16 饱和削波。ES8388 引脚仍在 YAMNet 菜单（由 audio_capture 使用）。
-
-endmenu
-
-menu "ESP-SR 语音唤醒"
-
-    config ESP_SR_WAKE_ENABLE
-        bool "启用 esp-sr 唤醒检测"
-        depends on YAMNET_ENABLE
-        default n
-        help
-            订阅 audio_capture，经 AFE+WakeNet 检测唤醒词。
-            检测到后调用 audio_stream_start()（需 AUDIO_STREAM_ENABLE）。
-            menuconfig → ESP Speech Recognition 中选择 WakeNet 模型（默认建议 wn9_hilexin「Hi 乐鑫」），
-            并确保 partitions.csv 有 label=model 的分区。
-
-    config ESP_SR_WAKE_START_STREAM
-        bool "唤醒后自动开始 UDP 透传"
-        depends on ESP_SR_WAKE_ENABLE && AUDIO_STREAM_ENABLE
-        default y
-
-    config ESP_SR_WAKE_FETCH_CORE
-        int "AFE fetch 任务绑核 (-1=不绑定)"
-        depends on ESP_SR_WAKE_ENABLE
-        range -1 1
-        default 1
-
-endmenu
-
-menu "音频网络透传 (唤醒后 UDP PCM)"
-
-    config AUDIO_STREAM_ENABLE
-        bool "启用 UDP 裸 PCM 透传"
-        depends on YAMNET_ENABLE
-        default n
-        help
-            独立订阅 audio_capture。可由 esp-sr 唤醒后自动 start，或手动调用。
-            需 WiFi 已连接。
-
-    config AUDIO_STREAM_UDP_HOST
-        string "UDP 目标主机"
-        depends on AUDIO_STREAM_ENABLE
-        default "192.168.1.100"
-
-    config AUDIO_STREAM_UDP_PORT
-        int "UDP 目标端口"
-        depends on AUDIO_STREAM_ENABLE
-        default 9000
-        range 1 65535
-
-    config AUDIO_STREAM_MAX_MS
-        int "单次透传最长时长 (ms)"
-        depends on AUDIO_STREAM_ENABLE
-        default 15000
-        range 1000 120000
-        help
-            超时自动 stop，防止一直占网。0 不适用（至少 1s）。
-
-endmenu
-
-menu "MCP 雷达事件"
+menu "4. MCP 雷达事件"
 
     config MCP_RADAR_POLL_INTERVAL_MS
-        int "C4004 事件检测轮询间隔 (ms)"
+        int "事件检测轮询 (ms)"
         default 500
         range 200 5000
-        help
-            后台任务读取区域状态的间隔。越短响应越快，CPU 占用略高。
 
     config MCP_RADAR_DWELL_MS
-        int "区域停留告警时长 (ms)"
+        int "停留告警时长 (ms)"
         default 30000
         range 5000 300000
-        help
-            某区域持续有人超过该时长时，触发 area_dwell（停留过久）事件。
 
     config MCP_RADAR_OCC_DEBOUNCE_MS
-        int "人数统计区域进出防抖 (ms)"
+        int "进出防抖 (ms)"
         default 1500
         range 500 10000
-        help
-            strategy 1 区域：人数读数需连续稳定超过该时长才触发事件。
-            人数每增加 1 上报一次 area_enter，每减少 1 上报一次 area_exit。
 
     config MCP_RADAR_CROSSING_COOLDOWN_MS
-        int "房间无人后抑制重复离开 (ms)"
+        int "room_empty 后抑制重复离开 (ms)"
         default 3000
         range 1000 30000
-        help
-            room_empty 上报后，在该时长内抑制重复的 area_exit（雷达假目标）。
-            同一区域多次 area_enter/area_exit 由进出防抖控制，不再额外冷却。
 
     config MCP_EVENT_LOG_SIZE
-        int "事件环形缓冲区条数"
+        int "事件环形缓冲条数"
         default 32
         range 8 128
-        help
-            sensor://events 与单区域资源 read 时返回的近期事件条数上限。
 
 endmenu

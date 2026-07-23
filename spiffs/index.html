@@ -78,7 +78,7 @@
           </div>
           <div class="panel-title-text">
             <h2 class="gjs-t-h2 font-heading panel-title">环境监测数据</h2>
-            <p class="panel-subtitle">展示当前设备采集到的温湿度与 CO2 指标。</p>
+            <p class="panel-subtitle">温湿度、CO2、照度与加速度计实时数据。</p>
           </div>
         </div>
       </div>
@@ -112,6 +112,36 @@
             <span class="metric-tag">AIR</span>
           </div>
           <div id="co2" class="metric-value">--</div>
+        </div>
+        <div class="gjs-t-border metric-card">
+          <div class="metric-header">
+            <div class="metric-label-group">
+              <div class="metric-icon-wrap">
+                <img src="/icons/thermometer-sun.svg" alt="照度图标" class="metric-icon"/>
+              </div>
+              <div class="metric-label-text">
+                <span class="metric-label">环境照度</span>
+                <span class="metric-meta">LTR-303ALS-01</span>
+              </div>
+            </div>
+            <span class="metric-tag">ALS</span>
+          </div>
+          <div id="lux" class="metric-value">--</div>
+        </div>
+        <div class="gjs-t-border metric-card">
+          <div class="metric-header">
+            <div class="metric-label-group">
+              <div class="metric-icon-wrap">
+                <img src="/icons/users-round.svg" alt="加速度图标" class="metric-icon"/>
+              </div>
+              <div class="metric-label-text">
+                <span class="metric-label">加速度</span>
+                <span class="metric-meta">SC7A20H · X/Y/Z (g)</span>
+              </div>
+            </div>
+            <span class="metric-tag">IMU</span>
+          </div>
+          <div id="accel" class="metric-value">--</div>
         </div>
       </div>
     </article>

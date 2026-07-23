@@ -149,6 +149,16 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.6.1
+  espressif/led_strip:
+    component_hash: 28c6509a727ef74925b372ed404772aeedf11cce10b78c3f69b3c66799095e2d
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.5.5
   espressif/mcp-c-sdk:
     component_hash: 58252f2ca194794f11aff0ff559b6c16cc57c0838d99558011c2f95eeae87e00
     dependencies:
@@ -202,9 +212,10 @@ direct_dependencies:
 - espressif/esp_codec_dev
 - espressif/esp_hosted
 - espressif/esp_wifi_remote
+- espressif/led_strip
 - espressif/mcp-c-sdk
 - espressif/mdns
 - idf
-manifest_hash: eb779979ddf8a4f001bbc295e32bab97d9d1620a933519ef4421e463d72ac8d9
+manifest_hash: f3194441acdfd8b6a2f5a64980b3bf6c07a5223fd353534b9d7a8975c2c00e48
 target: esp32p4
 version: 2.0.0

@@ -1,6 +1,6 @@
 /**
  * @file audio_capture.c
- * @brief 独立采集实现：硬件、数字增益、引用计数、多 sink 扇出
+ * @brief 独立采集实现：ES7210/I2S、数字增益、引用计数、多 sink 扇出
  */
 #include "audio_capture.h"
 
@@ -13,13 +13,12 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
-#if CONFIG_YAMNET_AUDIO_SOURCE_ES8388
+#if CONFIG_AUDIO_SOURCE_ES7210
 #include "driver/i2c_master.h"
 #include "driver/i2s_std.h"
-#include "es8388_codec.h"
+#include "es7210_adc.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
-#include "stcc4_sensor.h"
 #endif
 
 static const char *TAG = "audio_capture";
@@ -44,8 +43,7 @@ static TaskHandle_t s_task;
 static volatile bool s_running;
 static sink_slot_t s_sinks[AUDIO_CAPTURE_MAX_SINKS];
 
-#if CONFIG_YAMNET_AUDIO_SOURCE_ES8388
-static i2s_chan_handle_t s_i2s_tx;
+#if CONFIG_AUDIO_SOURCE_ES7210
 static i2s_chan_handle_t s_i2s_rx;
 static i2c_master_bus_handle_t s_i2c_owned;
 static const audio_codec_data_if_t *s_data_if;
@@ -53,6 +51,7 @@ static const audio_codec_ctrl_if_t *s_ctrl_if;
 static const audio_codec_gpio_if_t *s_gpio_if;
 static const audio_codec_if_t *s_codec_if;
 static esp_codec_dev_handle_t s_record_dev;
+static int s_hw_channels = 1;
 #endif
 
 static void ensure_lock(void)
@@ -62,7 +61,7 @@ static void ensure_lock(void)
     }
 }
 
-/** 对 int16 PCM 做固定倍数放大并饱和削波。 */
+/** �?int16 PCM 做固定倍数放大并饱和削波�?*/
 static void apply_digital_gain(int16_t *buf, size_t n_samples)
 {
 #if CONFIG_AUDIO_CAPTURE_DIGITAL_GAIN > 1
@@ -82,7 +81,7 @@ static void apply_digital_gain(int16_t *buf, size_t n_samples)
 #endif
 }
 
-/** 将一块 PCM 分发给所有已注册 sink（拷贝表后调用，避免长时间持锁）。 */
+/** 将一�?PCM 分发给所有已注册 sink（拷贝表后调用，避免长时间持锁）�?*/
 static void fanout_pcm(const int16_t *buf, size_t n_samples)
 {
     sink_slot_t local[AUDIO_CAPTURE_MAX_SINKS];
@@ -101,18 +100,35 @@ static void fanout_pcm(const int16_t *buf, size_t n_samples)
     }
 }
 
-/** 采集任务：读 I2S（或假数据）→ 数字增益 → fanout。 */
+#if CONFIG_AUDIO_SOURCE_ES7210
+/** 立体声交�?�?单声道（平均）原地压缩�?*/
+static size_t stereo_to_mono(int16_t *buf, size_t n_interleaved)
+{
+    size_t frames = n_interleaved / 2;
+    for (size_t i = 0; i < frames; i++) {
+        int32_t l = buf[i * 2];
+        int32_t r = buf[i * 2 + 1];
+        buf[i] = (int16_t)((l + r) / 2);
+    }
+    return frames;
+}
+#endif
+
+/** 采集任务：读 I2S（或假数据）�?数字增益 �?fanout�?*/
 static void capture_task(void *arg)
 {
     (void)arg;
     int16_t buf[512];
 
     while (s_running) {
-#if CONFIG_YAMNET_AUDIO_SOURCE_ES8388
+#if CONFIG_AUDIO_SOURCE_ES7210
         if (s_record_dev != NULL) {
             int ret = esp_codec_dev_read(s_record_dev, buf, (int)sizeof(buf));
             if (ret == ESP_CODEC_DEV_OK) {
-                const size_t n = sizeof(buf) / sizeof(buf[0]);
+                size_t n = sizeof(buf) / sizeof(buf[0]);
+                if (s_hw_channels >= 2) {
+                    n = stereo_to_mono(buf, n);
+                }
                 apply_digital_gain(buf, n);
                 fanout_pcm(buf, n);
             } else {
@@ -135,45 +151,14 @@ static void capture_task(void *arg)
     vTaskDelete(NULL);
 }
 
-#if CONFIG_YAMNET_AUDIO_SOURCE_ES8388
-static gpio_num_t gpio_or_unused(int pin)
-{
-    return (pin < 0) ? I2S_GPIO_UNUSED : (gpio_num_t)pin;
-}
-
-static int pa_pin_or_nc(void)
-{
-#if CONFIG_YAMNET_ES8388_USE_PA
-    return CONFIG_YAMNET_ES8388_PA_PIN;
-#else
-    return -1;
-#endif
-}
+#if CONFIG_AUDIO_SOURCE_ES7210
 
 static esp_err_t ensure_i2c_bus(i2c_master_bus_handle_t *out_bus)
 {
-#if CONFIG_YAMNET_ES8388_SHARE_STCC4_I2C
-    i2c_master_bus_handle_t bus = stcc4_sensor_get_i2c_bus();
-    if (bus != NULL) {
-        ESP_LOGI(TAG, "ES8388 shares STCC4 I2C0 bus");
-        *out_bus = bus;
-        return ESP_OK;
-    }
-    if (i2c_master_get_bus_handle(I2C_NUM_0, &bus) == ESP_OK && bus != NULL) {
-        ESP_LOGI(TAG, "ES8388 reuses existing I2C0 bus");
-        *out_bus = bus;
-        return ESP_OK;
-    }
-    ESP_LOGW(TAG, "shared I2C0 missing; creating I2C0 for ES8388");
-    i2c_port_t port = I2C_NUM_0;
-    int sda = CONFIG_STCC4_I2C_SDA;
-    int scl = CONFIG_STCC4_I2C_SCL;
-#else
-    i2c_port_t port = (i2c_port_t)CONFIG_YAMNET_ES8388_I2C_PORT;
-    int sda = CONFIG_YAMNET_ES8388_I2C_SDA;
-    int scl = CONFIG_YAMNET_ES8388_I2C_SCL;
-    ESP_LOGI(TAG, "ES8388 dedicated I2C%u SDA=%d SCL=%d", (unsigned)port, sda, scl);
-#endif
+    i2c_port_t port = (i2c_port_t)CONFIG_ES7210_I2C_PORT;
+    int sda = CONFIG_ES7210_I2C_SDA;
+    int scl = CONFIG_ES7210_I2C_SCL;
+    ESP_LOGI(TAG, "ES7210 I2C%u SDA=%d SCL=%d", (unsigned)port, sda, scl);
 
     i2c_master_bus_config_t bus_cfg = {
         .i2c_port = port,
@@ -193,23 +178,22 @@ static esp_err_t ensure_i2c_bus(i2c_master_bus_handle_t *out_bus)
     return ESP_OK;
 }
 
-static uint8_t es8388_addr_for_codec(uint8_t addr_7bit)
+static uint8_t es7210_addr_for_codec(uint8_t addr_7bit)
 {
-    if (addr_7bit == 0x11) {
-        return ES8388_CODEC_DEFAULT_ADDR_1;
-    }
-    if (addr_7bit == 0x10) {
-        return ES8388_CODEC_DEFAULT_ADDR;
+    if (addr_7bit == 0x40) {
+        return ES7210_CODEC_DEFAULT_ADDR; /* 0x80 */
     }
     return (uint8_t)(addr_7bit << 1);
 }
 
-static esp_err_t probe_es8388(i2c_master_bus_handle_t bus, uint8_t *addr_out)
+static esp_err_t probe_es7210(i2c_master_bus_handle_t bus, uint8_t *addr_out)
 {
     const uint8_t candidates[] = {
-        (uint8_t)CONFIG_YAMNET_ES8388_I2C_ADDR,
-        0x10,
-        0x11,
+        (uint8_t)CONFIG_ES7210_I2C_ADDR,
+        0x40,
+        0x41,
+        0x42,
+        0x43,
     };
 
     for (size_t i = 0; i < sizeof(candidates); i++) {
@@ -226,7 +210,7 @@ static esp_err_t probe_es8388(i2c_master_bus_handle_t bus, uint8_t *addr_out)
         }
         if (i2c_master_probe(bus, addr, 200) == ESP_OK) {
             *addr_out = addr;
-            ESP_LOGI(TAG, "ES8388 ACK at 7-bit addr 0x%02X", addr);
+            ESP_LOGI(TAG, "ES7210 ACK at 7-bit addr 0x%02X", addr);
             return ESP_OK;
         }
         ESP_LOGW(TAG, "no ACK at 0x%02X", addr);
@@ -234,7 +218,16 @@ static esp_err_t probe_es8388(i2c_master_bus_handle_t bus, uint8_t *addr_out)
     return ESP_ERR_NOT_FOUND;
 }
 
-static esp_err_t start_es8388(void)
+static uint8_t es7210_mic_mask(void)
+{
+    uint8_t m = ES7210_SEL_MIC1;
+#if CONFIG_ES7210_MIC_COUNT >= 2
+    m |= ES7210_SEL_MIC2;
+#endif
+    return m;
+}
+
+static esp_err_t start_es7210(void)
 {
     i2c_master_bus_handle_t i2c_bus = NULL;
     esp_err_t err = ensure_i2c_bus(&i2c_bus);
@@ -243,40 +236,43 @@ static esp_err_t start_es8388(void)
         return err;
     }
 
-    uint8_t es_addr = (uint8_t)CONFIG_YAMNET_ES8388_I2C_ADDR;
-    err = probe_es8388(i2c_bus, &es_addr);
+    uint8_t es_addr = (uint8_t)CONFIG_ES7210_I2C_ADDR;
+    err = probe_es7210(i2c_bus, &es_addr);
     if (err != ESP_OK) {
         ESP_LOGE(TAG,
-                 "ES8388 not found on I2C (tried 0x10/0x11). "
-                 "Check SDA/SCL/ADDR and menuconfig YAMNET_ES8388_I2C_*");
+                 "ES7210 not found on I2C (tried 0x40..). "
+                 "Check SDA/SCL/ADDR and menuconfig ES7210_I2C_*");
         return err;
     }
+
+    s_hw_channels = CONFIG_ES7210_MIC_COUNT;
 
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true;
 
-    err = i2s_new_channel(&chan_cfg, &s_i2s_tx, &s_i2s_rx);
+    /* ES7210 �?ADC：只�?RX */
+    err = i2s_new_channel(&chan_cfg, NULL, &s_i2s_rx);
     if (err != ESP_OK) {
-        err = i2s_new_channel(&chan_cfg, NULL, &s_i2s_rx);
-        if (err != ESP_OK) {
-            return err;
-        }
-        s_i2s_tx = NULL;
+        ESP_LOGE(TAG, "i2s_new_channel RX failed: %s", esp_err_to_name(err));
+        return err;
     }
+
+    i2s_slot_mode_t slot_mode =
+        (s_hw_channels >= 2) ? I2S_SLOT_MODE_STEREO : I2S_SLOT_MODE_MONO;
 
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_CAPTURE_SAMPLE_RATE),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, slot_mode),
         .gpio_cfg = {
-#if CONFIG_YAMNET_I2S_USE_MCLK
-            .mclk = CONFIG_YAMNET_I2S_MCLK,
+#if CONFIG_ES7210_I2S_USE_MCLK
+            .mclk = CONFIG_ES7210_I2S_MCLK,
 #else
             .mclk = I2S_GPIO_UNUSED,
 #endif
-            .bclk = CONFIG_YAMNET_I2S_BCLK,
-            .ws = CONFIG_YAMNET_I2S_WS,
-            .dout = gpio_or_unused(CONFIG_YAMNET_I2S_DOUT),
-            .din = CONFIG_YAMNET_I2S_DIN,
+            .bclk = CONFIG_ES7210_I2S_BCLK,
+            .ws = CONFIG_ES7210_I2S_WS,
+            .dout = I2S_GPIO_UNUSED,
+            .din = CONFIG_ES7210_I2S_DIN,
             .invert_flags = {
                 .mclk_inv = false,
                 .bclk_inv = false,
@@ -284,25 +280,17 @@ static esp_err_t start_es8388(void)
             },
         },
     };
-#if CONFIG_YAMNET_I2S_USE_MCLK
+#if CONFIG_ES7210_I2S_USE_MCLK
     std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
 #endif
-    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
-
-    if (s_i2s_tx != NULL) {
-        err = i2s_channel_init_std_mode(s_i2s_tx, &std_cfg);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "I2S TX init failed: %s", esp_err_to_name(err));
-            return err;
-        }
+    if (s_hw_channels < 2) {
+        std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
     }
+
     err = i2s_channel_init_std_mode(s_i2s_rx, &std_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "I2S RX init failed: %s", esp_err_to_name(err));
         return err;
-    }
-    if (s_i2s_tx != NULL) {
-        (void)i2s_channel_enable(s_i2s_tx);
     }
     err = i2s_channel_enable(s_i2s_rx);
     if (err != ESP_OK) {
@@ -312,20 +300,16 @@ static esp_err_t start_es8388(void)
     audio_codec_i2s_cfg_t i2s_cfg = {
         .port = I2S_NUM_0,
         .rx_handle = s_i2s_rx,
-        .tx_handle = s_i2s_tx,
+        .tx_handle = NULL,
     };
     s_data_if = audio_codec_new_i2s_data(&i2s_cfg);
     if (s_data_if == NULL) {
         return ESP_FAIL;
     }
 
-    const uint8_t es_addr_codec = es8388_addr_for_codec(es_addr);
+    const uint8_t es_addr_codec = es7210_addr_for_codec(es_addr);
     audio_codec_i2c_cfg_t i2c_cfg = {
-#if CONFIG_YAMNET_ES8388_SHARE_STCC4_I2C
-        .port = I2C_NUM_0,
-#else
-        .port = (i2c_port_t)CONFIG_YAMNET_ES8388_I2C_PORT,
-#endif
+        .port = (i2c_port_t)CONFIG_ES7210_I2C_PORT,
         .addr = es_addr_codec,
         .bus_handle = i2c_bus,
     };
@@ -339,21 +323,16 @@ static esp_err_t start_es8388(void)
         return ESP_FAIL;
     }
 
-    es8388_codec_cfg_t es_cfg = {
+    es7210_codec_cfg_t es_cfg = {
         .ctrl_if = s_ctrl_if,
-        .gpio_if = s_gpio_if,
-        .codec_mode = ESP_CODEC_DEV_WORK_MODE_ADC,
         .master_mode = false,
-        .pa_pin = pa_pin_or_nc(),
-        .pa_reverted = false,
-        .hw_gain = {
-            .pa_voltage = 5.0f,
-            .codec_dac_voltage = 3.3f,
-        },
+        .mic_selected = es7210_mic_mask(),
+        .mclk_src = ES7210_MCLK_FROM_PAD,
+        .mclk_div = 256,
     };
-    s_codec_if = es8388_codec_new(&es_cfg);
+    s_codec_if = es7210_codec_new(&es_cfg);
     if (s_codec_if == NULL) {
-        ESP_LOGE(TAG, "es8388_codec_new failed");
+        ESP_LOGE(TAG, "es7210_codec_new failed");
         return ESP_FAIL;
     }
 
@@ -370,8 +349,10 @@ static esp_err_t start_es8388(void)
 
     esp_codec_dev_sample_info_t fs = {
         .bits_per_sample = 16,
-        .channel = 1,
-        .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
+        .channel = (uint8_t)s_hw_channels,
+        .channel_mask = (s_hw_channels >= 2)
+                            ? (ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) | ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1))
+                            : ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
         .sample_rate = AUDIO_CAPTURE_SAMPLE_RATE,
         .mclk_multiple = 0,
     };
@@ -381,20 +362,21 @@ static esp_err_t start_es8388(void)
         return err;
     }
 
-    (void)esp_codec_dev_set_in_gain(s_record_dev, (float)CONFIG_YAMNET_ES8388_MIC_GAIN_DB);
+    (void)esp_codec_dev_set_in_gain(s_record_dev, (float)CONFIG_ES7210_MIC_GAIN_DB);
 
     ESP_LOGI(TAG,
-             "ES8388 ready @ %d Hz mic_hw=%ddB dig_gain=x%d "
+             "ES7210 ready @ %d Hz ch=%d mic_hw=%ddB dig_gain=x%d "
              "(I2C 7-bit=0x%02X codec=0x%02X BCLK=%d WS=%d DIN=%d MCLK=%s)",
              AUDIO_CAPTURE_SAMPLE_RATE,
-             CONFIG_YAMNET_ES8388_MIC_GAIN_DB,
+             s_hw_channels,
+             CONFIG_ES7210_MIC_GAIN_DB,
              CONFIG_AUDIO_CAPTURE_DIGITAL_GAIN,
              es_addr,
              es_addr_codec,
-             CONFIG_YAMNET_I2S_BCLK,
-             CONFIG_YAMNET_I2S_WS,
-             CONFIG_YAMNET_I2S_DIN,
-#if CONFIG_YAMNET_I2S_USE_MCLK
+             CONFIG_ES7210_I2S_BCLK,
+             CONFIG_ES7210_I2S_WS,
+             CONFIG_ES7210_I2S_DIN,
+#if CONFIG_ES7210_I2S_USE_MCLK
              "on"
 #else
              "off"
@@ -403,7 +385,7 @@ static esp_err_t start_es8388(void)
     return ESP_OK;
 }
 
-static void stop_es8388(void)
+static void stop_es7210(void)
 {
     if (s_record_dev != NULL) {
         esp_codec_dev_close(s_record_dev);
@@ -431,52 +413,47 @@ static void stop_es8388(void)
         i2s_del_channel(s_i2s_rx);
         s_i2s_rx = NULL;
     }
-    if (s_i2s_tx != NULL) {
-        i2s_channel_disable(s_i2s_tx);
-        i2s_del_channel(s_i2s_tx);
-        s_i2s_tx = NULL;
-    }
     if (s_i2c_owned != NULL) {
         i2c_del_master_bus(s_i2c_owned);
         s_i2c_owned = NULL;
     }
 }
-#endif /* ES8388 */
+#endif /* ES7210 */
 
-/** 打开硬件并拉起采集任务（仅 refcount 从 0→1 时调用）。 */
+/** 打开硬件并拉起采集任务（�?refcount �?0�? 时调用）�?*/
 static esp_err_t start_hw(void)
 {
-#if CONFIG_YAMNET_AUDIO_SOURCE_ES8388
-    esp_err_t err = start_es8388();
+#if CONFIG_AUDIO_SOURCE_ES7210
+    esp_err_t err = start_es7210();
     if (err != ESP_OK) {
-        stop_es8388();
+        stop_es7210();
         return err;
     }
 #else
-    ESP_LOGW(TAG, "capture = fake noise (select ES8388); dig_gain=x%d",
+    ESP_LOGW(TAG, "capture = fake noise (select ES7210); dig_gain=x%d",
              CONFIG_AUDIO_CAPTURE_DIGITAL_GAIN);
 #endif
 
     s_running = true;
     if (xTaskCreate(capture_task, "aud_cap", 4096, NULL, 5, &s_task) != pdPASS) {
         s_running = false;
-#if CONFIG_YAMNET_AUDIO_SOURCE_ES8388
-        stop_es8388();
+#if CONFIG_AUDIO_SOURCE_ES7210
+        stop_es7210();
 #endif
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
 }
 
-/** 停止采集任务并关闭硬件。 */
+/** 停止采集任务并关闭硬件�?*/
 static void stop_hw(void)
 {
     s_running = false;
     while (s_task != NULL) {
         vTaskDelay(pdMS_TO_TICKS(20));
     }
-#if CONFIG_YAMNET_AUDIO_SOURCE_ES8388
-    stop_es8388();
+#if CONFIG_AUDIO_SOURCE_ES7210
+    stop_es7210();
 #endif
 }
 

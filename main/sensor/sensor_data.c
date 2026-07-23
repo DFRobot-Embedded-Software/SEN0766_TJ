@@ -1,5 +1,7 @@
 #include "sensor_data.h"
 #include "stcc4_sensor.h"
+#include "ltr303_sensor.h"
+#include "sc7a20h_sensor.h"
 #include "c4004_sensor.h"
 
 #include <stdlib.h>
@@ -295,6 +297,16 @@ void sensor_data_init(void)
         ESP_LOGW(TAG, "STCC4 init failed: %s", esp_err_to_name(err));
     }
 
+    err = ltr303_sensor_start();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "LTR-303 init failed: %s", esp_err_to_name(err));
+    }
+
+    err = sc7a20h_sensor_start();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "SC7A20H init failed: %s", esp_err_to_name(err));
+    }
+
     if (s_area_config.enabled) {
         if (xTaskCreate(c4004_boot_task, "c4004_boot", C4004_BOOT_TASK_STACK, NULL, 3, NULL) != pdPASS) {
             ESP_LOGW(TAG, "C4004 boot task create failed");
@@ -312,6 +324,14 @@ esp_err_t sensor_data_get_snapshot(sensor_snapshot_t *out)
 
     if (stcc4_sensor_get(&out->temperature, &out->humidity, &out->co2) == ESP_OK) {
         out->env_ready = true;
+    }
+
+    if (ltr303_sensor_get(&out->lux) == ESP_OK) {
+        out->lux_ready = true;
+    }
+
+    if (sc7a20h_sensor_get(&out->ax, &out->ay, &out->az) == ESP_OK) {
+        out->accel_ready = true;
     }
 
     if (!s_area_config.enabled || s_area_config.tag_count == 0) {

@@ -6,10 +6,14 @@ set(srcs
     "web/web_fs.c"
     "sensor/sensor_data.c"
     "sensor/stcc4_sensor.c"
+    "sensor/ltr303_sensor.c"
+    "sensor/sc7a20h_sensor.c"
     "sensor/c4004_sensor.c"
     "mcp/mcp_server.c"
     "mcp/mcp_radar_events.c"
     "led/ws2812_led.c"
+    "led/ws2812_fx.c"
+    "audio/amp/ns4168_amp.c"
 )
 
 set(yamnet_requires "")
@@ -48,6 +52,7 @@ idf_component_register(
         "sensor"
         "mcp"
         "led"
+        "audio/amp"
         "audio/capture"
         "audio/stream"
         "audio/wake"

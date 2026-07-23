@@ -160,6 +160,24 @@ static esp_err_t api_data_handler(httpd_req_t *req)
         cJSON_AddNullToObject(root, "co2");
     }
 
+    cJSON_AddBoolToObject(root, "lux_ready", snapshot.lux_ready);
+    if (snapshot.lux_ready) {
+        cJSON_AddNumberToObject(root, "lux", snapshot.lux);
+    } else {
+        cJSON_AddNullToObject(root, "lux");
+    }
+
+    cJSON_AddBoolToObject(root, "accel_ready", snapshot.accel_ready);
+    if (snapshot.accel_ready) {
+        cJSON_AddNumberToObject(root, "ax", snapshot.ax);
+        cJSON_AddNumberToObject(root, "ay", snapshot.ay);
+        cJSON_AddNumberToObject(root, "az", snapshot.az);
+    } else {
+        cJSON_AddNullToObject(root, "ax");
+        cJSON_AddNullToObject(root, "ay");
+        cJSON_AddNullToObject(root, "az");
+    }
+
     cJSON *areas = cJSON_AddArrayToObject(root, "areas");
     for (uint8_t i = 0; i < snapshot.area_count; i++) {
         const area_status_t *st = &snapshot.areas[i];

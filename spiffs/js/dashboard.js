@@ -314,12 +314,25 @@ async function refresh() {
 
     const tempEl = document.getElementById("temp");
     const co2El = document.getElementById("co2");
+    const luxEl = document.getElementById("lux");
+    const accelEl = document.getElementById("accel");
     if (data.env_ready) {
       tempEl.textContent = `${data.temp} / ${data.humidity}`;
       co2El.textContent = `${data.co2} ppm`;
     } else {
       tempEl.textContent = "-- / --";
       co2El.textContent = "预热中…";
+    }
+    if (data.lux_ready && data.lux != null) {
+      luxEl.textContent = `${Number(data.lux).toFixed(1)} lx`;
+    } else {
+      luxEl.textContent = "--";
+    }
+    if (data.accel_ready && data.ax != null) {
+      accelEl.textContent =
+        `${Number(data.ax).toFixed(2)} / ${Number(data.ay).toFixed(2)} / ${Number(data.az).toFixed(2)}`;
+    } else {
+      accelEl.textContent = "--";
     }
 
     if (areaConfig.enabled && Array.isArray(data.areas) && data.areas.length > 0) {

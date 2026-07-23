@@ -119,8 +119,10 @@ idf.py menuconfig
 | 传输层 | `Component config → ESP-Hosted config → Transport layer` | **SDIO** |
 | 开发板 | `Component config → ESP-Hosted config` | 勾选 `ESP32-P4 Function EV Board`（若使用官方板） |
 | SDIO 引脚 | `Component config → ESP-Hosted config → Hosted SDIO Configuration` | 使用默认值或按硬件修改 |
-| C4004 UART | `Component config → C4004 毫米波雷达` | TX=50, RX=51, 115200（见下文接线） |
-| STCC4 I2C | `Component config → STCC4 环境传感器` | SDA=7, SCL=8（见下文接线） |
+| C4004 UART | `1. 板级总线与传感器 → C4004` | TX=50, RX=51, UART1 |
+| 传感器 I2C0 | `1. 板级总线与传感器` | SDA=1, SCL=0（STCC4/LTR/SC7A20H 共用） |
+| ES7210 | `2. 音频硬件 → ES7210` | I2C1 SDA=7/SCL=8；I2S0 BCLK=29/WS=27/DIN=28/MCLK=30 |
+| NS4168 | `2. 音频硬件 → NS4168` | I2S1 BCLK=33/WS=32/DOUT=26 |
 
 > 若 `Wi-Fi Remote → Wi-Fi configuration` 菜单不可见，请确认 IDF 版本 ≥ 5.4，且 `Host WiFi Enable` 已关闭。
 
@@ -170,34 +172,62 @@ http://192.168.x.x
 
 页面包含环境监测数据（温湿度、CO2）和人员活动状态，数据通过 `/api/data` 接口每 **1 秒** 刷新。STCC4 上电后约需 20 秒预热，预热期间页面显示「预热中…」。
 
-### STCC4 传感器接线
+### 板级引脚与总线（当前 sdkconfig）
 
-默认引脚适用于 **ESP32-P4-Function-EV-Board**（可在 `idf.py menuconfig` → **STCC4 环境传感器** 中修改）：
+menuconfig 按总线分组：`1. 板级总线与传感器` / `2. 音频硬件` / `3. 音频算法` / `4. MCP`。
 
-| STCC4 引脚 | ESP32-P4 |
-|------------|----------|
-| VCC | 3.3V |
-| GND | GND |
-| SDA | GPIO7 |
-| SCL | GPIO8 |
+| 总线 | 设备 | 地址 / 通道 | 引脚 |
+|------|------|-------------|------|
+| **I2C0** | STCC4 | `0x64` | SDA=**1**, SCL=**0** |
+| I2C0 | LTR-303ALS-01 | `0x29` | 同上 |
+| I2C0 | SC7A20H | `0x19`（可试 `0x18`） | 同上 |
+| **I2C1** | ES7210 | `0x40` | SDA=**7**, SCL=**8** |
+| **I2S0** RX | ES7210 录音 | 双麦下混 mono | BCLK=**29**, WS=**27**, DIN=**28**, MCLK=**30** |
+| **I2S1** TX | NS4168 功放 | 16 kHz mono | BCLK=**33**, WS=**32**, DOUT=**26** |
+| **UART1** | C4004 | 115200 | TX=**50**, RX=**51** |
+| RMT | WS2812 | 7 灯 | DIN=**21** |
 
-- I2C 地址默认 **0x64**（模块跳线改为 0x65 时需同步修改 menuconfig，且当前 `vrxiaojie/stcc4` 驱动内部固定为 0x64）
-- 串口日志出现 `CO2=xxx ppm, T=xx.x°C, RH=xx.x%` 表示采样正常
-- 若启动报 `STCC4 not found`，检查接线、上拉与供电
+### I2C0 环境传感器
+
+STCC4 / LTR-303 / SC7A20H 共用 I2C0（menuconfig → **1. 板级总线与传感器**）：
+
+| 信号 | ESP32-P4 |
+|------|----------|
+| SDA | GPIO1 |
+| SCL | GPIO0 |
+| VCC / GND | 3.3V / GND |
+
+- STCC4 地址默认 **0x64**
+- 串口出现 `CO2=...` / `LTR-303 ready` / `SC7A20H ready` 表示正常
+- 若 `STCC4 not found`，检查接线、上拉与供电
 
 ### WS2812 彩灯
 
 | 信号 | ESP32-P4 |
 |------|----------|
-| DIN | **GPIO21**（menuconfig → **WS2812 彩灯** 可改） |
+| DIN | **GPIO21**（menuconfig → **1. 板级 → WS2812**） |
 | VCC / GND | 按灯珠供电（与 P4 共地） |
 
-- 默认 1 颗；启动后弱白表示驱动已就绪
-- API：`ws2812_led_set_rgb(r,g,b)` / `ws2812_led_clear()`（见 `main/led/ws2812_led.h`）
+- 默认 **7** 颗灯
+- 底层：`ws2812_led_*`；灯效：`ws2812_fx_start()`（流水 / 呼吸 / 闪烁 / 扩散 / 静态），见 `main/led/ws2812_fx.h`
+- 新灯效会打断当前效果；`loops`/`count` 为 0 表示无限循环（静态除外）
+
+```c
+ws2812_fx_cfg_t fx = {
+    .mode = WS2812_FX_BREATH,
+    .u.breath = {
+        .r = 0, .g = 80, .b = 255,
+        .bright_min = 10, .bright_max = 180,
+        .period_ms = 1600, .loops = 0,
+        .range = ws2812_range_all(),
+    },
+};
+ws2812_fx_start(&fx);
+```
 
 ### C4004 毫米波雷达接线
 
-C4004 通过 **UART** 与 ESP32-P4 通信（可在 `idf.py menuconfig` → **C4004 毫米波雷达** 中修改引脚与波特率）：
+C4004 通过 **UART** 通信（menuconfig → **1. 板级 → C4004**）：
 
 | C4004 引脚 | ESP32-P4 | 说明 |
 |------------|----------|------|
@@ -237,11 +267,9 @@ C4004 通过 **UART** 与 ESP32-P4 通信（可在 `idf.py menuconfig` → **C40
 idf.py menuconfig
 ```
 
-- `Component config → ESP PSRAM`：启用 SPIRAM（`sdkconfig.defaults.esp32p4` 已默认打开）
-- `YAMNet 声音事件分类`：勾选 **启用 YAMNet**
-- 音频来源：默认 **ES8388**；无麦验证可选 Fake
-- ES8388 默认与 STCC4 **共用 I2C0**（SDA/SCL 见 STCC4 配置），I2C 地址 `0x10`
-- I2S 默认：BCLK=12 / WS=10 / DIN=9 / MCLK=13（请按你的接线改 menuconfig）
+- `Component config → ESP PSRAM`：启用 SPIRAM
+- **3. 音频算法**：勾选 **启用 YAMNet**
+- **2. 音频硬件**：麦克风选 ES7210（引脚见上表）；无麦可选 Fake
 
 3. 全量烧录（含 `yamnet` 模型分区）：
 
@@ -249,9 +277,9 @@ idf.py menuconfig
 idf.py build flash monitor
 ```
 
-串口应看到 `ES8388 record ready` 与周期性 `infer xxx ms | #1 ...`。
+串口应看到 `ES7210 ready` 与周期性 `infer xxx ms | #1 ...`。
 
-> 若 ES8388 接在独立 I2C，关闭「与 STCC4 共用 I2C0」并设置 SDA/SCL。ADDR 接高时地址改为 `0x11`。
+> AD0 接地时地址多为 `0x40`（codec 8-bit `0x80`）。
 
 ### 修改网页（无需改 C 代码）
 

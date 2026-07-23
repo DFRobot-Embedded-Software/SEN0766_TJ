@@ -49,9 +49,7 @@ esp_err_t ws2812_led_init(void)
     }
 
     ESP_LOGI(TAG, "WS2812 ready GPIO=%d leds=%d", CONFIG_WS2812_GPIO, CONFIG_WS2812_LED_COUNT);
-
-    /* 弱白表示已初始化，避免上电刺眼 */
-    return ws2812_led_set_rgb(8, 8, 8);
+    return ws2812_led_clear();
 }
 
 void ws2812_led_deinit(void)

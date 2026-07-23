@@ -13,7 +13,7 @@
 
 ```text
 main/audio/
-  capture/   audio_capture     ← 唯一碰 ES8388 / 数字增益 / 多 sink
+  capture/   audio_capture     ← 唯一碰 ES7210 / 数字增益 / 多 sink
   stream/    audio_stream      ← UDP 透传（独立订阅 capture）
   wake/      esp_sr_wake       ← esp-sr AFE + WakeNet
   yamnet/    pcm_in / mel / events / classifier
@@ -29,7 +29,7 @@ audio_capture
 
 关注哪些声音、用哪些 class id、阈值与投票：**只改** `main/audio/yamnet/yamnet_events.c` 里的 `s_event_table`。
 
-远场：`YAMNET_ES8388_MIC_GAIN_DB` + `AUDIO_CAPTURE_DIGITAL_GAIN`。
+远场：`ES7210_MIC_GAIN_DB` + `AUDIO_CAPTURE_DIGITAL_GAIN`。
 
 ### 语音唤醒（esp-sr）
 

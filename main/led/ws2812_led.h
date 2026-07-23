@@ -12,8 +12,8 @@ extern "C" {
 #endif
 
 /**
- * 初始化 RMT 驱动并点亮默认待机色（弱白）。
- * 未开启 CONFIG_WS2812_ENABLE 时为空操作。
+ * 初始化 RMT 驱动。未开启 CONFIG_WS2812_ENABLE 时为空操作。
+ * 灯效请用 ws2812_fx_start()。
  */
 esp_err_t ws2812_led_init(void);
 

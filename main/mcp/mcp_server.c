@@ -178,6 +178,24 @@ static cJSON *snapshot_to_json(const sensor_snapshot_t *snapshot)
         cJSON_AddNullToObject(root, "co2_ppm");
     }
 
+    cJSON_AddBoolToObject(root, "lux_ready", snapshot->lux_ready);
+    if (snapshot->lux_ready) {
+        cJSON_AddNumberToObject(root, "lux", snapshot->lux);
+    } else {
+        cJSON_AddNullToObject(root, "lux");
+    }
+
+    cJSON_AddBoolToObject(root, "accel_ready", snapshot->accel_ready);
+    if (snapshot->accel_ready) {
+        cJSON_AddNumberToObject(root, "ax_g", snapshot->ax);
+        cJSON_AddNumberToObject(root, "ay_g", snapshot->ay);
+        cJSON_AddNumberToObject(root, "az_g", snapshot->az);
+    } else {
+        cJSON_AddNullToObject(root, "ax_g");
+        cJSON_AddNullToObject(root, "ay_g");
+        cJSON_AddNullToObject(root, "az_g");
+    }
+
     cJSON *areas = cJSON_AddArrayToObject(root, "areas");
     for (uint8_t i = 0; i < snapshot->area_count; i++) {
         const area_status_t *st = &snapshot->areas[i];

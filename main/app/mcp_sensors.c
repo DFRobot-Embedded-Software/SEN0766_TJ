@@ -3,7 +3,12 @@
 
 #include "esp_log.h"
 #include "sdkconfig.h"
+#include "ns4168_amp.h"
 #include "ws2812_led.h"
+#include "ws2812_fx.h"
+
+static const char *TAG = "mcp_sensors";
+
 #if !CONFIG_YAMNET_VERIFY_ONLY
 #include "esp_sntp.h"
 #include "mdns.h"
@@ -23,7 +28,21 @@
 #endif
 #endif
 
-static const char *TAG = "mcp_sensors";
+static void ws2812_show_idle(void)
+{
+    ws2812_fx_cfg_t fx = {
+        .mode = WS2812_FX_STATIC,
+        .u.stat = {
+            .on = true,
+            .r = 8,
+            .g = 8,
+            .b = 8,
+            .brightness = 255,
+            .range = ws2812_range_all(),
+        },
+    };
+    (void)ws2812_fx_start(&fx);
+}
 
 #if !CONFIG_YAMNET_VERIFY_ONLY
 
@@ -123,6 +142,13 @@ void app_main(void)
     esp_err_t err = ws2812_led_init();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "WS2812 init failed: %s", esp_err_to_name(err));
+    } else {
+        ws2812_show_idle();
+    }
+
+    err = ns4168_amp_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NS4168 init failed: %s", esp_err_to_name(err));
     }
 
 #if CONFIG_YAMNET_ENABLE
@@ -145,6 +171,13 @@ void app_main(void)
     err = ws2812_led_init();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "WS2812 init failed: %s", esp_err_to_name(err));
+    } else {
+        ws2812_show_idle();
+    }
+
+    err = ns4168_amp_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NS4168 init failed: %s", esp_err_to_name(err));
     }
 
     sensor_data_init();

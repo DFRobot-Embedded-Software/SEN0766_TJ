@@ -1,6 +1,6 @@
 /**
  * @file audio_capture.h
- * @brief 独立音频采集层：ES8388/I2S + 数字增益 + 多路 PCM 订阅
+ * @brief 独立音频采集层：ES7210/I2S + 数字增益 + 多路 PCM 订阅
  *
  * 唯一允许打开麦克风硬件的模块。YAMNet / esp-sr / 网络透传只通过 sink 订阅，
  * 不得直接操作 codec。
@@ -27,7 +27,7 @@ extern "C" {
 typedef void (*audio_pcm_sink_fn)(const int16_t *pcm, size_t n_samples, void *ctx);
 
 /**
- * 占用采集：引用计数 +1。首次调用时打开 ES8388 并启动采集任务。
+ * 占用采集：引用计数 +1。首次调用时打开 ES7210 并启动采集任务。
  * @return ESP_OK 或硬件/内存错误码
  */
 esp_err_t audio_capture_acquire(void);

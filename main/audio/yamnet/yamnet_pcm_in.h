@@ -2,7 +2,7 @@
  * @file yamnet_pcm_in.h
  * @brief YAMNet 专用 PCM 输入桥：私有 ring + 订阅 audio_capture
  *
- * 不打开 ES8388/I2S；与透传、esp-sr 互不依赖。
+ * 不打开 ES7210/I2S；与透传、esp-sr 互不依赖。
  */
 #pragma once
 

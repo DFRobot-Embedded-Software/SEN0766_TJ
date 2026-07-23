@@ -79,8 +79,8 @@ static esp_err_t init_i2c_bus(void)
 
     i2c_master_bus_config_t bus_cfg = {
         .i2c_port = I2C_NUM_0,
-        .sda_io_num = CONFIG_STCC4_I2C_SDA,
-        .scl_io_num = CONFIG_STCC4_I2C_SCL,
+        .sda_io_num = CONFIG_SENSOR_I2C0_SDA,
+        .scl_io_num = CONFIG_SENSOR_I2C0_SCL,
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
@@ -242,7 +242,7 @@ esp_err_t stcc4_sensor_start(void)
     uint8_t addr = (uint8_t)CONFIG_STCC4_I2C_ADDR;
     if (i2c_master_probe(s_i2c_bus, addr, STCC4_I2C_TIMEOUT_MS) != ESP_OK) {
         ESP_LOGE(TAG, "STCC4 not found at 0x%02X (SDA=%d SCL=%d)",
-                 addr, CONFIG_STCC4_I2C_SDA, CONFIG_STCC4_I2C_SCL);
+                 addr, CONFIG_SENSOR_I2C0_SDA, CONFIG_SENSOR_I2C0_SCL);
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -266,7 +266,7 @@ esp_err_t stcc4_sensor_start(void)
 
     s_ready = true;
     ESP_LOGI(TAG, "STCC4 started (SDA=%d SCL=%d, interval=%dms)",
-             CONFIG_STCC4_I2C_SDA, CONFIG_STCC4_I2C_SCL, CONFIG_STCC4_POLL_INTERVAL_MS);
+             CONFIG_SENSOR_I2C0_SDA, CONFIG_SENSOR_I2C0_SCL, CONFIG_STCC4_POLL_INTERVAL_MS);
 
     BaseType_t ok = xTaskCreate(stcc4_poll_task, "stcc4", 4096, NULL, 5, NULL);
     if (ok != pdPASS) {
@@ -281,11 +281,6 @@ esp_err_t stcc4_sensor_start(void)
 bool stcc4_sensor_is_ready(void)
 {
     return s_ready;
-}
-
-i2c_master_bus_handle_t stcc4_sensor_get_i2c_bus(void)
-{
-    return s_i2c_bus;
 }
 
 esp_err_t stcc4_sensor_get(float *temperature, float *humidity, int *co2_ppm)
