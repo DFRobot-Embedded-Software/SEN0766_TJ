@@ -1,0 +1,146 @@
+/* 地图视觉：采集点颜色、人体图标、侧装雷达（贴近初始版全宽地图） */
+:root {
+  --point-1: #1265ee;
+  --point-2: #10b981;
+  --point-3: #f59e0b;
+  --point-4: #8b5cf6;
+}
+
+.draft-point.point-1,
+.point-row:nth-child(1) > i { background: var(--point-1) !important; }
+.draft-point.point-2,
+.point-row:nth-child(2) > i { background: var(--point-2) !important; }
+.draft-point.point-3,
+.point-row:nth-child(3) > i { background: var(--point-3) !important; }
+.draft-point.point-4,
+.point-row:nth-child(4) > i { background: var(--point-4) !important; }
+.draft-point.point-1 { box-shadow: 0 0 0 5px rgba(18,101,238,.15); }
+.draft-point.point-2 { box-shadow: 0 0 0 5px rgba(16,185,129,.15); }
+.draft-point.point-3 { box-shadow: 0 0 0 5px rgba(245,158,11,.16); }
+.draft-point.point-4 { box-shadow: 0 0 0 5px rgba(139,92,246,.15); }
+
+.target,
+.mini-person {
+  color: transparent !important;
+  font-size: 0 !important;
+  background-color: #1766ee !important;
+  background-image: url("../icons/person.svg") !important;
+  background-position: center !important;
+  background-repeat: no-repeat !important;
+  background-size: 18px 18px !important;
+  transform: translate(-50%, -50%);
+}
+.mini-person { background-size: 16px 16px !important; }
+
+.live-target-layer { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
+.target.live-person {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  border: 5px solid rgba(23,102,238,.22);
+  border-radius: 50%;
+  margin: 0;
+}
+.target.live-person.static {
+  background-color: #64748b !important;
+  border-color: rgba(100,116,139,.25);
+  opacity: .9;
+}
+.target.live-person.moving {
+  background-color: #1766ee !important;
+  border-color: rgba(23,102,238,.28);
+}
+.target.live-person.picked {
+  box-shadow: 0 0 0 3px rgba(16,185,129,.45);
+  z-index: 6;
+}
+#liveMap #target.hidden { display: none !important; }
+
+/* 侧装：雷达在顶部中央，波纹向下 */
+.radar-emitter {
+  position: absolute;
+  z-index: 6;
+  top: 0;
+  left: 50%;
+  width: 88px;
+  height: 52px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  overflow: hidden;
+}
+.radar-emitter i {
+  position: absolute;
+  z-index: 2;
+  top: 4px;
+  left: 40px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #1265ee;
+  box-shadow: 0 0 0 4px rgba(18,101,238,.14);
+}
+.radar-emitter span {
+  position: absolute;
+  display: block;
+  top: -8px;
+  left: 50%;
+  grid-column: auto !important;
+  background: transparent !important;
+  color: transparent;
+  border: 2px solid rgba(18,101,238,.28);
+  border-top: 0;
+  border-radius: 0 0 50% 50%;
+  transform: translateX(-50%);
+  animation: radar-wave 2.4s ease-out infinite;
+}
+.radar-emitter span:nth-of-type(1) { width: 28px; height: 26px; }
+.radar-emitter span:nth-of-type(2) { width: 52px; height: 38px; animation-delay: .35s; }
+.radar-emitter span:nth-of-type(3) { width: 80px; height: 50px; animation-delay: .7s; }
+@keyframes radar-wave {
+  0%, 30% { opacity: .25; }
+  60% { opacity: .75; }
+  100% { opacity: .12; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .radar-emitter span { animation: none; }
+}
+
+/* 全宽地图（初始版观感）：坐标仍按雷达 FOV 映射，视觉铺满卡片 */
+.map.radar-frame,
+.region-preview.radar-frame {
+  position: relative;
+  width: 100% !important;
+  max-width: 100%;
+  height: 300px !important;
+  aspect-ratio: auto !important;
+  margin: 0;
+  overflow: hidden !important;
+  border: 1px solid #bdc7d6;
+  border-radius: 8px;
+  background-color: #fff;
+  background-image:
+    linear-gradient(#e7ecf5 1px, transparent 1px),
+    linear-gradient(90deg, #e7ecf5 1px, transparent 1px);
+  background-size: 38px 38px;
+}
+.map.calibration.radar-frame {
+  height: 360px !important;
+}
+.live-boundary.full-fov {
+  inset: 16px !important;
+  left: auto !important;
+  top: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  width: auto !important;
+  height: auto !important;
+}
+@media (max-width: 760px) {
+  .map.radar-frame,
+  .region-preview.radar-frame {
+    height: 260px !important;
+  }
+  .map.calibration.radar-frame {
+    height: 300px !important;
+  }
+}

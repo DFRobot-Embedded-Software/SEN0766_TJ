@@ -14,20 +14,23 @@
 extern "C" {
 #endif
 
-#define AREA_TAG_MAX       16
-#define AREA_TAG_NAME_LEN  32
+#define AREA_TAG_MAX          16
+#define AREA_TAG_NAME_LEN     32
+#define AREA_TAG_SETTING_LEN  16
 #define AREA_RECT_MIN_SIZE_CM 10
 
-/** @brief C4004 区域标签 */
+/** @brief C4004 区域标签（coords 单位：cm） */
 typedef struct {
     uint8_t strategy;
     char name[AREA_TAG_NAME_LEN];
+    char setting[AREA_TAG_SETTING_LEN]; /**< 前端标签附加参数，如灵敏度 */
     float coords[4][2];
 } area_tag_t;
 
-/** @brief 区域配置（NVS 持久化） */
+/** @brief 区域配置（NVS 持久化；内部坐标均为 cm） */
 typedef struct {
-    bool enabled;
+    bool has_detection_range;
+    float detection_range[4][2]; /**< 检测边界四点，单位 cm */
     uint8_t tag_count;
     area_tag_t tags[AREA_TAG_MAX];
 } area_config_t;
@@ -56,7 +59,7 @@ typedef struct {
     uint16_t height;
 } area_rect_t;
 
-/** @brief 从 NVS 加载区域配置，若已启用则拉起 C4004 后台任务 */
+/** @brief 从 NVS 加载区域配置，并拉起 C4004 */
 void radar_area_init(void);
 
 /** @brief 读取各已配置区域的实时状态（长度不超过 AREA_TAG_MAX，返回实际数量） */
@@ -72,11 +75,14 @@ bool area_coords_valid(const area_tag_t *tag);
 esp_err_t area_coords_to_rect(const area_tag_t *tag, area_rect_t *out);
 
 esp_err_t area_config_get(area_config_t *out);
-esp_err_t area_config_set_enabled(bool enabled);
-esp_err_t area_config_add_tag(const area_tag_t *tag);
+/** @brief 添加标签；成功时 *out_id 为新下标（可传 NULL） */
+esp_err_t area_config_add_tag(const area_tag_t *tag, uint8_t *out_id);
+esp_err_t area_config_update_tag(uint8_t index, const area_tag_t *tag);
 esp_err_t area_config_remove_tag(uint8_t index);
+/** @brief 设置检测范围四点（cm）并同步到 C4004 */
+esp_err_t area_config_set_detection_range(const float coords[4][2]);
 
-/** 区域配置变更回调（增删标签、开关雷达区域后触发） */
+/** 区域配置变更回调（增删标签、改检测范围后触发） */
 typedef void (*area_config_changed_cb_t)(void);
 void area_config_set_change_callback(area_config_changed_cb_t cb);
 

@@ -1,6 +1,6 @@
 /**
  * @file sc7a20h_sensor.c
- * @brief SC7A20H：I2C 加速度计（LIS2DH 兼容），输出 ax/ay/az (g)
+ * @brief SC7A20H：I2C 加速度计（LIS2DH 兼容），输出 ax/ay/az (g) + 垂直/前后倾角
  */
 #include "sc7a20h_sensor.h"
 
@@ -8,6 +8,9 @@
 #include "sdkconfig.h"
 
 #if CONFIG_SC7A20H_ENABLE
+#include <math.h>
+#include <string.h>
+
 #include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -26,6 +29,22 @@ static const char *TAG = "sc7a20h";
 #define SC7A20H_I2C_TIMEOUT_MS 200
 #define SC7A20H_MG_PER_LSB    1.0f
 
+#if CONFIG_SC7A20H_UP_AXIS_X
+#define SC7A20H_UP_AXIS 0
+#elif CONFIG_SC7A20H_UP_AXIS_Z
+#define SC7A20H_UP_AXIS 2
+#else
+#define SC7A20H_UP_AXIS 1
+#endif
+
+#if CONFIG_SC7A20H_FORWARD_AXIS_X
+#define SC7A20H_FWD_AXIS 0
+#elif CONFIG_SC7A20H_FORWARD_AXIS_Y
+#define SC7A20H_FWD_AXIS 1
+#else
+#define SC7A20H_FWD_AXIS 2
+#endif
+
 static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_i2c_dev;
 static SemaphoreHandle_t s_lock;
@@ -34,6 +53,59 @@ static bool s_has_data;
 static float s_ax;
 static float s_ay;
 static float s_az;
+static sc7a20h_tilt_t s_tilt;
+
+static float axis_value(float ax, float ay, float az, int axis)
+{
+    switch (axis) {
+    case 0:
+        return ax;
+    case 1:
+        return ay;
+    default:
+        return az;
+    }
+}
+
+static void compute_tilt(float ax, float ay, float az, sc7a20h_tilt_t *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    /* 竖直轴与前向轴相同则无法定义倾角（配置错误） */
+    if (SC7A20H_UP_AXIS == SC7A20H_FWD_AXIS) {
+        return;
+    }
+
+    float up = axis_value(ax, ay, az, SC7A20H_UP_AXIS);
+    float fwd = axis_value(ax, ay, az, SC7A20H_FWD_AXIS);
+
+    /* 静止时模长应接近 1g；剧烈晃动时倾角不可信 */
+    float mag = sqrtf(ax * ax + ay * ay + az * az);
+    if (mag < 0.5f || mag > 1.6f) {
+        return;
+    }
+
+    /* 若竖直轴为负（芯片装反），统一翻到“向上为正”再算倾角 */
+    if (up < 0.0f) {
+        up = -up;
+        fwd = -fwd;
+    }
+
+    float tilt = atan2f(fwd, up) * (180.0f / 3.14159265f);
+#if CONFIG_SC7A20H_INVERT_TILT
+    tilt = -tilt;
+#endif
+
+    out->tilt_deg = tilt;
+    out->upright = fabsf(tilt) <= (float)CONFIG_SC7A20H_UPRIGHT_TOLERANCE_DEG;
+    if (!out->upright) {
+        if (tilt > 0.0f) {
+            out->forward_deg = tilt;
+        } else {
+            out->backward_deg = -tilt;
+        }
+    }
+}
 
 static esp_err_t ensure_i2c_bus(void)
 {
@@ -99,10 +171,13 @@ static void poll_task(void *arg)
         float ax = 0.0f, ay = 0.0f, az = 0.0f;
         esp_err_t err = read_accel_once(&ax, &ay, &az);
         if (err == ESP_OK) {
+            sc7a20h_tilt_t tilt = {0};
+            compute_tilt(ax, ay, az, &tilt);
             xSemaphoreTake(s_lock, portMAX_DELAY);
             s_ax = ax;
             s_ay = ay;
             s_az = az;
+            s_tilt = tilt;
             s_has_data = true;
             xSemaphoreGive(s_lock);
         } else {
@@ -226,6 +301,20 @@ esp_err_t sc7a20h_sensor_get(float *ax, float *ay, float *az)
     return ESP_OK;
 }
 
+esp_err_t sc7a20h_sensor_get_tilt(sc7a20h_tilt_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_ready || !s_has_data) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *out = s_tilt;
+    xSemaphoreGive(s_lock);
+    return ESP_OK;
+}
+
 #else /* !CONFIG_SC7A20H_ENABLE */
 
 esp_err_t sc7a20h_sensor_start(void)
@@ -243,6 +332,12 @@ esp_err_t sc7a20h_sensor_get(float *ax, float *ay, float *az)
     (void)ax;
     (void)ay;
     (void)az;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t sc7a20h_sensor_get_tilt(sc7a20h_tilt_t *out)
+{
+    (void)out;
     return ESP_ERR_NOT_SUPPORTED;
 }
 

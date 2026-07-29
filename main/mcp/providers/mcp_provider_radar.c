@@ -23,9 +23,16 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include <math.h>
+
 static const char *TAG = "mcp_radar";
 
 #define MCP_AREA_SYNC_STACK 10240
+
+static double round1(double v)
+{
+    return round(v * 10.0) / 10.0;
+}
 
 typedef struct {
     esp_mcp_resource_t *resource;
@@ -48,7 +55,6 @@ static cJSON *area_config_to_json(const area_config_t *cfg)
         return NULL;
     }
 
-    cJSON_AddBoolToObject(root, "enabled", cfg->enabled);
     cJSON *tags = cJSON_AddArrayToObject(root, "tags");
     for (uint8_t i = 0; i < cfg->tag_count; i++) {
         const area_tag_t *tag = &cfg->tags[i];
@@ -99,8 +105,8 @@ static esp_mcp_value_t fetch_radar_coord_callback(const esp_mcp_property_list_t 
     if (json == NULL) {
         return esp_mcp_value_create_bool(false);
     }
-    cJSON_AddNumberToObject(json, "x_cm", x);
-    cJSON_AddNumberToObject(json, "y_cm", y);
+    cJSON_AddNumberToObject(json, "x_cm", round1(x));
+    cJSON_AddNumberToObject(json, "y_cm", round1(y));
     cJSON_AddNumberToObject(json, "target_count", target_count);
     cJSON_AddNumberToObject(json, "picked_index", picked_index);
     return mcp_json_to_value(json);
@@ -207,7 +213,7 @@ static void sync_area_resources(void)
 
     clear_area_resources();
 
-    if (area_config_get(&s_sync_cfg) != ESP_OK || !s_sync_cfg.enabled || s_sync_cfg.tag_count == 0) {
+    if (area_config_get(&s_sync_cfg) != ESP_OK || s_sync_cfg.tag_count == 0) {
         ESP_LOGI(TAG, "area event resources cleared");
         return;
     }

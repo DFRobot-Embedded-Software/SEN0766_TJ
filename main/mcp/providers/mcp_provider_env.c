@@ -5,6 +5,7 @@
 #include "mcp_provider_env.h"
 
 #include "board_snapshot.h"
+#include "env_sensors.h"
 #include "mcp_core.h"
 #include "mcp_json_util.h"
 
@@ -24,9 +25,15 @@
 static const char *TAG = "mcp_env";
 
 #define MCP_TEMP_CHANGE_THRESHOLD_C 0.1f
+#define MCP_TEMP_WATCH_STACK        8192
 
 static TaskHandle_t s_temp_watch_task;
 static volatile bool s_runtime;
+
+static double round1(double v)
+{
+    return round(v * 10.0) / 10.0;
+}
 
 static cJSON *snapshot_to_json(const sensor_snapshot_t *snapshot)
 {
@@ -37,8 +44,8 @@ static cJSON *snapshot_to_json(const sensor_snapshot_t *snapshot)
 
     cJSON_AddBoolToObject(root, "env_ready", snapshot->env_ready);
     if (snapshot->env_ready) {
-        cJSON_AddNumberToObject(root, "temperature_c", snapshot->temperature);
-        cJSON_AddNumberToObject(root, "humidity_pct", snapshot->humidity);
+        cJSON_AddNumberToObject(root, "temperature_c", round1(snapshot->temperature));
+        cJSON_AddNumberToObject(root, "humidity_pct", round1(snapshot->humidity));
         cJSON_AddNumberToObject(root, "co2_ppm", snapshot->co2);
     } else {
         cJSON_AddNullToObject(root, "temperature_c");
@@ -48,7 +55,7 @@ static cJSON *snapshot_to_json(const sensor_snapshot_t *snapshot)
 
     cJSON_AddBoolToObject(root, "lux_ready", snapshot->lux_ready);
     if (snapshot->lux_ready) {
-        cJSON_AddNumberToObject(root, "lux", snapshot->lux);
+        cJSON_AddNumberToObject(root, "lux", (int)lround(snapshot->lux));
     } else {
         cJSON_AddNullToObject(root, "lux");
     }
@@ -112,13 +119,13 @@ static esp_err_t temperature_resource_read_cb(const char *uri,
 
     cJSON_AddBoolToObject(json, "ready", snap.env_ready);
     if (snap.env_ready) {
-        cJSON_AddNumberToObject(json, "temperature_c", snap.temperature);
-        cJSON_AddNumberToObject(json, "humidity_pct", snap.humidity);
+        cJSON_AddNumberToObject(json, "temperature_c", round1(snap.temperature));
+        cJSON_AddNumberToObject(json, "humidity_pct", round1(snap.humidity));
         cJSON_AddNumberToObject(json, "co2_ppm", snap.co2);
     }
     cJSON_AddBoolToObject(json, "lux_ready", snap.lux_ready);
     if (snap.lux_ready) {
-        cJSON_AddNumberToObject(json, "lux", snap.lux);
+        cJSON_AddNumberToObject(json, "lux", (int)lround(snap.lux));
     }
 
     char *payload = cJSON_PrintUnformatted(json);
@@ -143,14 +150,14 @@ static void temperature_watch_task(void *arg)
     const TickType_t interval = pdMS_TO_TICKS(CONFIG_STCC4_POLL_INTERVAL_MS);
 
     while (s_runtime) {
-        sensor_snapshot_t snap = {0};
-        if (board_snapshot_get(&snap) == ESP_OK && snap.env_ready) {
+        env_snapshot_t snap = {0};
+        if (env_sensors_get(&snap) == ESP_OK && snap.env_ready) {
             bool changed = isnan(last_temperature) ||
                            fabsf(snap.temperature - last_temperature) >= MCP_TEMP_CHANGE_THRESHOLD_C;
             if (changed) {
                 last_temperature = snap.temperature;
                 mcp_core_notify_resource(MCP_RESOURCE_TEMPERATURE_URI);
-                ESP_LOGI(TAG, "Temperature update pushed: %.2f C", snap.temperature);
+                ESP_LOGI(TAG, "Temperature update pushed: %.2f C", (double)snap.temperature);
             }
         }
         vTaskDelay(interval);
@@ -189,8 +196,8 @@ static esp_err_t env_register_resources(esp_mcp_t *mcp)
 static esp_err_t env_start_runtime(void)
 {
     s_runtime = true;
-    if (xTaskCreate(temperature_watch_task, "mcp_temp_watch", 3072, NULL, 4, &s_temp_watch_task) !=
-        pdPASS) {
+    if (xTaskCreate(temperature_watch_task, "mcp_temp_watch", MCP_TEMP_WATCH_STACK, NULL, 4,
+                    &s_temp_watch_task) != pdPASS) {
         s_temp_watch_task = NULL;
         ESP_LOGW(TAG, "temperature watch task failed");
         return ESP_ERR_NO_MEM;

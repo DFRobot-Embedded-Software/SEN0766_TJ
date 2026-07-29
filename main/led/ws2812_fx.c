@@ -29,9 +29,10 @@
 static SemaphoreHandle_t s_lock;
 static TaskHandle_t s_task;
 static volatile bool s_run;
-static volatile bool s_busy;
 static ws2812_fx_cfg_t s_cfg;
-static uint32_t s_gen; /* 递增以打断旧循环 */
+static uint32_t s_gen;
+static ws2812_fx_done_cb_t s_done_cb;
+static void *s_done_ctx;
 
 static const char *TAG = "ws2812_fx";
 
@@ -74,12 +75,20 @@ static void scale_rgb(uint8_t r, uint8_t g, uint8_t b, uint8_t bright, uint8_t *
     *ob = (uint8_t)((uint16_t)b * bright / 255);
 }
 
-static void fill_range(const ws2812_range_t *rg, uint8_t r, uint8_t g, uint8_t b, uint8_t bright)
+static bool led_selected(int i, uint8_t mask, const ws2812_range_t *rg)
+{
+    if (mask != 0) {
+        return (mask & (1u << i)) != 0;
+    }
+    return i >= rg->start && i <= rg->end;
+}
+
+static void fill_leds(uint8_t mask, const ws2812_range_t *rg, uint8_t r, uint8_t g, uint8_t b, uint8_t bright)
 {
     uint8_t rr, gg, bb;
     scale_rgb(r, g, b, bright, &rr, &gg, &bb);
     for (int i = 0; i < LED_N; i++) {
-        if (i >= rg->start && i <= rg->end) {
+        if (led_selected(i, mask, rg)) {
             (void)ws2812_led_set_pixel((uint32_t)i, rr, gg, bb);
         } else {
             (void)ws2812_led_set_pixel((uint32_t)i, 0, 0, 0);
@@ -126,7 +135,9 @@ static void run_flow(uint32_t gen, ws2812_fx_flow_t p)
         clear_all();
         uint8_t rr, gg, bb;
         scale_rgb(p.r, p.g, p.b, p.brightness ? p.brightness : 255, &rr, &gg, &bb);
-        (void)ws2812_led_set_pixel((uint32_t)pos, rr, gg, bb);
+        if (led_selected(pos, p.led_mask, &p.range)) {
+            (void)ws2812_led_set_pixel((uint32_t)pos, rr, gg, bb);
+        }
         (void)ws2812_led_refresh();
         delay_abortable(gen, p.step_ms);
         if (!still(gen)) {
@@ -139,7 +150,6 @@ static void run_flow(uint32_t gen, ws2812_fx_flow_t p)
                 dir = -dir;
                 next = pos + dir;
                 if (dir > 0) {
-                    /* 刚从反向折回正向：完成一轮来回 */
                     loops_done++;
                 }
             }
@@ -157,6 +167,51 @@ static void run_flow(uint32_t gen, ws2812_fx_flow_t p)
 
         if (p.loops != 0 && loops_done >= p.loops) {
             break;
+        }
+    }
+}
+
+static void run_grad_flow(uint32_t gen, ws2812_fx_grad_flow_t p)
+{
+    if (!clamp_range(&p.range)) {
+        return;
+    }
+    if (p.step_ms == 0) {
+        p.step_ms = 60;
+    }
+    const int n = p.range.end - p.range.start + 1;
+    if (n <= 0) {
+        return;
+    }
+    const uint8_t bright = p.brightness ? p.brightness : 255;
+    uint16_t loops_done = 0;
+    int phase = 0;
+
+    while (still(gen)) {
+        for (int i = p.range.start; i <= p.range.end; i++) {
+            int idx = i - p.range.start;
+            float t = (float)((idx + phase) % n) / (float)(n > 1 ? n - 1 : 1);
+            if (t > 1.0f) {
+                t = 1.0f;
+            }
+            uint8_t r = (uint8_t)((float)p.r + ((float)p.r2 - (float)p.r) * t);
+            uint8_t g = (uint8_t)((float)p.g + ((float)p.g2 - (float)p.g) * t);
+            uint8_t b = (uint8_t)((float)p.b + ((float)p.b2 - (float)p.b) * t);
+            uint8_t rr, gg, bb;
+            scale_rgb(r, g, b, bright, &rr, &gg, &bb);
+            (void)ws2812_led_set_pixel((uint32_t)i, rr, gg, bb);
+        }
+        (void)ws2812_led_refresh();
+        delay_abortable(gen, p.step_ms);
+        if (!still(gen)) {
+            break;
+        }
+        phase = (phase + 1) % n;
+        if (phase == 0) {
+            loops_done++;
+            if (p.loops != 0 && loops_done >= p.loops) {
+                break;
+            }
         }
     }
 }
@@ -181,11 +236,15 @@ static void run_breath(uint32_t gen, ws2812_fx_breath_t p)
 
     while (still(gen)) {
         for (int i = 0; i <= steps && still(gen); i++) {
-            float phase = (float)i / (float)steps; /* 0..1 */
+            float phase = (float)i / (float)steps;
             float wave = 0.5f - 0.5f * cosf(phase * 2.0f * (float)M_PI);
             uint8_t br = (uint8_t)(p.bright_min + (float)(p.bright_max - p.bright_min) * wave);
-            fill_range(&p.range, p.r, p.g, p.b, br);
+            fill_leds(p.led_mask, &p.range, p.r, p.g, p.b, br);
             delay_abortable(gen, step_ms);
+        }
+        if (p.pause_ms > 0 && still(gen)) {
+            clear_all();
+            delay_abortable(gen, p.pause_ms);
         }
         loops_done++;
         if (p.loops != 0 && loops_done >= p.loops) {
@@ -204,7 +263,7 @@ static void run_blink(uint32_t gen, ws2812_fx_blink_t p)
     }
     uint16_t n = 0;
     while (still(gen)) {
-        fill_range(&p.range, p.r, p.g, p.b, p.brightness ? p.brightness : 255);
+        fill_leds(p.led_mask, &p.range, p.r, p.g, p.b, p.brightness ? p.brightness : 255);
         delay_abortable(gen, p.interval_ms);
         if (!still(gen)) {
             break;
@@ -235,8 +294,15 @@ static void run_spread(uint32_t gen, ws2812_fx_spread_t p)
     while (still(gen)) {
         for (int rad = 0; rad <= max_radius && still(gen); rad++) {
             clear_all();
+            float gt = (max_radius > 0) ? ((float)rad / (float)max_radius) : 0.0f;
+            uint8_t cr = p.r, cg = p.g, cb = p.b;
+            if (p.use_grad) {
+                cr = (uint8_t)((float)p.r + ((float)p.r2 - (float)p.r) * gt);
+                cg = (uint8_t)((float)p.g + ((float)p.g2 - (float)p.g) * gt);
+                cb = (uint8_t)((float)p.b + ((float)p.b2 - (float)p.b) * gt);
+            }
             uint8_t rr, gg, bb;
-            scale_rgb(p.r, p.g, p.b, p.brightness ? p.brightness : 255, &rr, &gg, &bb);
+            scale_rgb(cr, cg, cb, p.brightness ? p.brightness : 255, &rr, &gg, &bb);
             for (int i = a; i <= b; i++) {
                 int d = i - mid;
                 if (d < 0) {
@@ -249,7 +315,6 @@ static void run_spread(uint32_t gen, ws2812_fx_spread_t p)
             (void)ws2812_led_refresh();
             delay_abortable(gen, p.step_ms);
         }
-        /* 略留全亮再灭，形成一轮扩散 */
         delay_abortable(gen, p.step_ms);
         clear_all();
         delay_abortable(gen, p.step_ms);
@@ -262,7 +327,6 @@ static void run_spread(uint32_t gen, ws2812_fx_spread_t p)
 
 static void run_static(uint32_t gen, ws2812_fx_static_t p)
 {
-    (void)gen;
     if (!clamp_range(&p.range)) {
         return;
     }
@@ -270,7 +334,24 @@ static void run_static(uint32_t gen, ws2812_fx_static_t p)
         clear_all();
         return;
     }
-    fill_range(&p.range, p.r, p.g, p.b, p.brightness ? p.brightness : 255);
+
+    const uint8_t bright = p.brightness ? p.brightness : 255;
+    if (p.hold_ms == 0) {
+        fill_leds(p.led_mask, &p.range, p.r, p.g, p.b, bright);
+        return;
+    }
+
+    /* 白→蓝等：在 hold_ms 内线性渐变 */
+    const int steps = 30;
+    const uint32_t step_ms = p.hold_ms / (uint32_t)steps;
+    for (int i = 0; i <= steps && still(gen); i++) {
+        float t = (float)i / (float)steps;
+        uint8_t r = (uint8_t)((float)p.r + ((float)p.r2 - (float)p.r) * t);
+        uint8_t g = (uint8_t)((float)p.g + ((float)p.g2 - (float)p.g) * t);
+        uint8_t b = (uint8_t)((float)p.b + ((float)p.b2 - (float)p.b) * t);
+        fill_leds(p.led_mask, &p.range, r, g, b, bright);
+        delay_abortable(gen, step_ms > 0 ? step_ms : 1);
+    }
 }
 
 static void fx_task(void *arg)
@@ -284,12 +365,15 @@ static void fx_task(void *arg)
 
         ws2812_fx_cfg_t cfg;
         uint32_t gen;
+        ws2812_fx_done_cb_t done;
+        void *done_ctx;
         xSemaphoreTake(s_lock, portMAX_DELAY);
         cfg = s_cfg;
         gen = s_gen;
+        done = s_done_cb;
+        done_ctx = s_done_ctx;
         xSemaphoreGive(s_lock);
 
-        s_busy = true;
         switch (cfg.mode) {
         case WS2812_FX_FLOW:
             run_flow(gen, cfg.u.flow);
@@ -306,16 +390,26 @@ static void fx_task(void *arg)
         case WS2812_FX_STATIC:
             run_static(gen, cfg.u.stat);
             break;
+        case WS2812_FX_GRAD_FLOW:
+            run_grad_flow(gen, cfg.u.grad);
+            break;
         default:
             break;
         }
-        if (gen == s_gen) {
-            s_busy = false;
+
+        /* 有限动画正常结束；被打断时 gen 已变，不回调 */
+        if (gen == s_gen && done != NULL) {
+            done(done_ctx);
         }
     }
 }
 
 esp_err_t ws2812_fx_start(const ws2812_fx_cfg_t *cfg)
+{
+    return ws2812_fx_start_ex(cfg, NULL, NULL);
+}
+
+esp_err_t ws2812_fx_start_ex(const ws2812_fx_cfg_t *cfg, ws2812_fx_done_cb_t done, void *ctx)
 {
     if (cfg == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -323,7 +417,7 @@ esp_err_t ws2812_fx_start(const ws2812_fx_cfg_t *cfg)
     ensure_lock();
 
     if (s_task == NULL) {
-        if (xTaskCreate(fx_task, "ws2812_fx", 3072, NULL, 3, &s_task) != pdPASS) {
+        if (xTaskCreate(fx_task, "ws2812_fx", 4096, NULL, 3, &s_task) != pdPASS) {
             s_task = NULL;
             return ESP_ERR_NO_MEM;
         }
@@ -331,9 +425,10 @@ esp_err_t ws2812_fx_start(const ws2812_fx_cfg_t *cfg)
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_cfg = *cfg;
+    s_done_cb = done;
+    s_done_ctx = ctx;
     s_gen++;
     s_run = true;
-    s_busy = true;
     xSemaphoreGive(s_lock);
 
     xTaskNotifyGive(s_task);
@@ -347,15 +442,12 @@ void ws2812_fx_stop(void)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_run = false;
     s_gen++;
-    s_busy = false;
+    s_done_cb = NULL;
+    s_done_ctx = NULL;
     xSemaphoreGive(s_lock);
     clear_all();
 }
 
-bool ws2812_fx_is_busy(void)
-{
-    return s_busy;
-}
 
 #else /* !CONFIG_WS2812_ENABLE */
 
@@ -371,11 +463,15 @@ esp_err_t ws2812_fx_start(const ws2812_fx_cfg_t *cfg)
     return ESP_ERR_NOT_SUPPORTED;
 }
 
+esp_err_t ws2812_fx_start_ex(const ws2812_fx_cfg_t *cfg, ws2812_fx_done_cb_t done, void *ctx)
+{
+    (void)cfg;
+    (void)done;
+    (void)ctx;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
 void ws2812_fx_stop(void) {}
 
-bool ws2812_fx_is_busy(void)
-{
-    return false;
-}
 
 #endif /* CONFIG_WS2812_ENABLE */

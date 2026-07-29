@@ -49,3 +49,28 @@ esp_err_t c4004_sensor_recover(const area_config_t *cfg, bool full_reset);
  * @param rect 区域矩形 (cm)，与 area_coords_to_rect 输出一致
  */
 esp_err_t c4004_sensor_count_targets_in_rect(const area_rect_t *rect, int *active, int *static_count);
+
+/**
+ * @brief 按当前传感器设置与加速度倾角，重新下发安装模式/高度/角度到 C4004
+ */
+esp_err_t c4004_sensor_sync_install(void);
+
+/** @brief 轨迹目标快照（厘米，雷达坐标系） */
+typedef struct {
+    uint8_t index;
+    uint8_t kinesia;
+    int16_t x_cm;
+    int16_t y_cm;
+    int16_t speed_cm_s;
+    bool moving;
+} c4004_target_info_t;
+
+/**
+ * @brief 复制最近一次 query/refresh 缓存的全部轨迹目标
+ * @note 通常先调用 c4004_sensor_query_target / refresh_targets
+ */
+esp_err_t c4004_sensor_get_targets(c4004_target_info_t *out, uint8_t max_count, uint8_t *out_count);
+
+/** @brief 当前检测 FOV（厘米），供网页按雷达坐标系投影 */
+void c4004_sensor_get_fov_cm(int16_t *x_min, int16_t *x_max, int16_t *y_min, int16_t *y_max);
+

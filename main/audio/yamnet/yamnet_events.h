@@ -7,6 +7,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -71,6 +72,14 @@ int yamnet_events_count(void);
 
 /** 按下标取事件描述；越界返回 NULL。 */
 const yamnet_event_desc_t *yamnet_events_get(int index);
+
+/**
+ * 读取最近一次告警；无告警返回 false。
+ * @param type_out   事件 id（cry/glass/...），可 NULL
+ * @param label_out  展示文案，可 NULL
+ * @param age_ms     距今毫秒，可 NULL
+ */
+bool yamnet_events_get_last(char *type_out, size_t type_len, char *label_out, size_t label_len, uint32_t *age_ms);
 
 #ifdef __cplusplus
 }

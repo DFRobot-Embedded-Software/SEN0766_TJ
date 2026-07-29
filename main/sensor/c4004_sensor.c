@@ -1,5 +1,8 @@
 #include "c4004_sensor.h"
+#include "sc7a20h_sensor.h"
+#include "sensor_settings.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -26,6 +29,7 @@ static const char *TAG = "c4004";
 
 #define C4004_CTRL_SYSTEM          0x01
 #define C4004_CTRL_WORK_STATUS     0x05
+#define C4004_CTRL_INSTALL_INFO    0x06
 #define C4004_CTRL_DETECTION_RANGE 0x07
 
 #define C4004_CMD_HEARTBEAT_QUERY       0x80
@@ -37,7 +41,16 @@ static const char *TAG = "c4004";
 #define C4004_CMD_SET_TAG               0x11
 #define C4004_CMD_SET_RANGE             0x1A
 
+#define C4004_CMD_INSTALL_SET_ANGLE     0x01
+#define C4004_CMD_INSTALL_SET_HEIGHT    0x02
+#define C4004_CMD_INSTALL_SET_MODE      0x06
+
+#define C4004_INSTALL_MODE_SIDE         0x01
+#define C4004_INSTALL_MODE_TOP          0x02
+
 #define C4004_RANGE_FOUR_SIDE           0x04
+#define C4004_RANGE_SIDE_DEFAULT        0x00
+#define C4004_RANGE_NO_BOUNDARY         0x07
 
 #define C4004_CTRL_TRAJECTORY              0x82
 #define C4004_CMD_TRAJECTORY_SET_ENABLE    0x00
@@ -71,6 +84,9 @@ typedef struct {
     bool approaching;
     bool leaving;
 } c4004_tag_state_t;
+
+static bool request_frame(uint8_t control, uint8_t cmd, const uint8_t *data, uint16_t len,
+                          c4004_packet_t *response, uint32_t timeout_ms);
 
 typedef struct {
     uint8_t index;
@@ -139,6 +155,90 @@ static void write_sign_i16(uint8_t *data, int16_t value)
     }
     raw |= ((uint16_t)magnitude & 0x7FFF);
     write_u16(data, raw);
+}
+
+/** 安装角用普通有符号 int16（×100），不是坐标那种符号位编码 */
+static void write_i16(uint8_t *data, int16_t value)
+{
+    write_u16(data, (uint16_t)value);
+}
+
+static int16_t clamp_angle_centi_deg(int32_t value)
+{
+    if (value > 18000) {
+        return 18000;
+    }
+    if (value < -18000) {
+        return -18000;
+    }
+    return (int16_t)value;
+}
+
+/**
+ * 用 SC7A20H 前后倾角配置 C4004 安装信息（不上报）。
+ * 垂直 → 角度全 0；否则将倾角写入 menuconfig 指定的 x/y/z 之一。
+ */
+static bool sync_install_from_accel(void)
+{
+    int16_t x_deg = 0;
+    int16_t y_deg = 0;
+    int16_t z_deg = 0;
+
+    sc7a20h_tilt_t tilt = {0};
+    if (sc7a20h_sensor_get_tilt(&tilt) == ESP_OK) {
+        int16_t pitch = 0;
+        if (!tilt.upright) {
+            pitch = (int16_t)lroundf(tilt.tilt_deg);
+        }
+#if CONFIG_C4004_TILT_ANGLE_X
+        x_deg = pitch;
+#elif CONFIG_C4004_TILT_ANGLE_Z
+        z_deg = pitch;
+#else
+        y_deg = pitch;
+#endif
+        ESP_LOGI(TAG, "accel tilt: upright=%d pitch=%.1f° → install (%d,%d,%d)",
+                 tilt.upright, (double)tilt.tilt_deg, (int)x_deg, (int)y_deg, (int)z_deg);
+    } else {
+        ESP_LOGW(TAG, "accel tilt unavailable, C4004 install angles = 0");
+    }
+
+    uint8_t mode =
+#if CONFIG_C4004_INSTALL_MODE_TOP
+        C4004_INSTALL_MODE_TOP;
+#else
+        C4004_INSTALL_MODE_SIDE;
+#endif
+
+    uint8_t angle_data[6];
+    write_i16(&angle_data[0], clamp_angle_centi_deg((int32_t)x_deg * 100));
+    write_i16(&angle_data[2], clamp_angle_centi_deg((int32_t)y_deg * 100));
+    write_i16(&angle_data[4], clamp_angle_centi_deg((int32_t)z_deg * 100));
+
+    uint8_t height_data[2];
+    const uint16_t height_cm = sensor_settings_install_height_cm();
+    write_u16(height_data, height_cm);
+
+    c4004_packet_t packet;
+    if (!request_frame(C4004_CTRL_INSTALL_INFO, C4004_CMD_INSTALL_SET_MODE,
+                       &mode, 1, &packet, C4004_DEFAULT_TIMEOUT_MS)) {
+        ESP_LOGW(TAG, "set install mode failed");
+        return false;
+    }
+    if (!request_frame(C4004_CTRL_INSTALL_INFO, C4004_CMD_INSTALL_SET_ANGLE,
+                       angle_data, sizeof(angle_data), &packet, C4004_DEFAULT_TIMEOUT_MS)) {
+        ESP_LOGW(TAG, "set install angle failed");
+        return false;
+    }
+    if (!request_frame(C4004_CTRL_INSTALL_INFO, C4004_CMD_INSTALL_SET_HEIGHT,
+                       height_data, sizeof(height_data), &packet, C4004_DEFAULT_TIMEOUT_MS)) {
+        ESP_LOGW(TAG, "set install height failed");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "C4004 install synced: mode=%u height=%ucm angles=(%d,%d,%d) deg",
+             mode, (unsigned)height_cm, (int)x_deg, (int)y_deg, (int)z_deg);
+    return true;
 }
 
 static void uart_flush_rx(void)
@@ -300,16 +400,19 @@ static bool wait_init_finished(void)
     uint8_t query = C4004_QUERY_DATA;
     c4004_packet_t packet;
     uint32_t start = xTaskGetTickCount();
+    ESP_LOGI(TAG, "waiting C4004 init finished...");
 
     while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(5000)) {
         if (request_frame(C4004_CTRL_WORK_STATUS, C4004_CMD_INIT_FINISHED_QUERY,
                           &query, 1, &packet, C4004_DEFAULT_TIMEOUT_MS)) {
             if (packet.len > 0 && packet.data[0] == 0x01) {
+                ESP_LOGI(TAG, "C4004 init finished ack");
                 return true;
             }
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
+    ESP_LOGW(TAG, "C4004 init-finished timeout, will try heartbeat");
     return false;
 }
 
@@ -331,6 +434,19 @@ static uint8_t web_strategy_to_tag_type(uint8_t strategy)
     default:
         return C4004_TAG_TYPE_PEOPLE_COUNT;
     }
+}
+
+static bool target_is_moving(const c4004_target_t *t)
+{
+    if (t == NULL) {
+        return false;
+    }
+    /* DFRobot：0x01 静止，0x02 运动；也可能为位组合（实测见 0x07） */
+    if (t->kinesia == 0x02 || (t->kinesia & 0x02) != 0) {
+        return true;
+    }
+    int16_t spd = t->speed < 0 ? (int16_t)(-t->speed) : t->speed;
+    return spd >= 10;
 }
 
 static void parse_targets(const uint8_t *data, uint16_t len)
@@ -368,7 +484,7 @@ static void parse_targets(const uint8_t *data, uint16_t len)
             int32_t dx = (int32_t)parsed[i].x - (int32_t)s_targets[j].x;
             int32_t dy = (int32_t)parsed[i].y - (int32_t)s_targets[j].y;
             if ((dx * dx + dy * dy) < (35 * 35)) {
-                if (parsed[i].kinesia == 0x02 && s_targets[j].kinesia != 0x02) {
+                if (target_is_moving(&parsed[i]) && !target_is_moving(&s_targets[j])) {
                     s_targets[j] = parsed[i];
                 }
                 merged = true;
@@ -412,7 +528,7 @@ static int pick_coord_target_index(void)
             best_speed = spd;
             best_speed_idx = (int)i;
         }
-        if (s_targets[i].kinesia == 0x02) {
+        if (target_is_moving(&s_targets[i])) {
             motion_idx = (int)i;
         }
     }
@@ -680,8 +796,85 @@ static esp_err_t send_tags_from_config(uint16_t payload_len, uint8_t tag_count)
     return ok ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
+static esp_err_t set_four_side_range_cm(float min_x, float max_x, float min_y, float max_y)
+{
+    uint8_t data[9];
+    data[0] = C4004_RANGE_FOUR_SIDE;
+    write_sign_i16(&data[1], (int16_t)max_x);
+    write_sign_i16(&data[3], (int16_t)min_x);
+    write_sign_i16(&data[5], (int16_t)max_y);
+    write_sign_i16(&data[7], (int16_t)min_y);
+
+    if (!request_frame(C4004_CTRL_DETECTION_RANGE, C4004_CMD_SET_RANGE,
+                       data, sizeof(data), &s_work_packet, C4004_DEFAULT_TIMEOUT_MS)) {
+        ESP_LOGW(TAG, "set detection range timeout");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    ESP_LOGI(TAG, "detection range x=[%.0f,%.0f] y=[%.0f,%.0f] cm",
+             min_x, max_x, min_y, max_y);
+    return ESP_OK;
+}
+
+static bool bounds_from_quad(const float coords[4][2],
+                             float *min_x, float *max_x, float *min_y, float *max_y)
+{
+    if (coords == NULL || min_x == NULL || max_x == NULL || min_y == NULL || max_y == NULL) {
+        return false;
+    }
+    *min_x = coords[0][0];
+    *max_x = coords[0][0];
+    *min_y = coords[0][1];
+    *max_y = coords[0][1];
+    for (int p = 1; p < 4; p++) {
+        if (coords[p][0] < *min_x) {
+            *min_x = coords[p][0];
+        }
+        if (coords[p][0] > *max_x) {
+            *max_x = coords[p][0];
+        }
+        if (coords[p][1] < *min_y) {
+            *min_y = coords[p][1];
+        }
+        if (coords[p][1] > *max_y) {
+            *max_y = coords[p][1];
+        }
+    }
+    return (*max_x - *min_x) >= 1.0f && (*max_y - *min_y) >= 1.0f;
+}
+
 static esp_err_t sync_detection_range(const area_config_t *cfg)
 {
+    if (cfg != NULL && cfg->has_detection_range) {
+        float min_x, max_x, min_y, max_y;
+        if (bounds_from_quad(cfg->detection_range, &min_x, &max_x, &min_y, &max_y)) {
+            return set_four_side_range_cm(min_x, max_x, min_y, max_y);
+        }
+    }
+
+#if CONFIG_C4004_RANGE_MODE_NO_BOUNDARY
+    (void)cfg;
+    uint8_t mode = C4004_RANGE_NO_BOUNDARY;
+    if (!request_frame(C4004_CTRL_DETECTION_RANGE, C4004_CMD_SET_RANGE,
+                       &mode, 1, &s_work_packet, C4004_DEFAULT_TIMEOUT_MS)) {
+        ESP_LOGW(TAG, "set detection range (no boundary) timeout");
+        return ESP_ERR_TIMEOUT;
+    }
+    ESP_LOGI(TAG, "detection range: no boundary (full FOV)");
+    return ESP_OK;
+
+#elif CONFIG_C4004_RANGE_MODE_SIDE_DEFAULT
+    (void)cfg;
+    uint8_t mode = C4004_RANGE_SIDE_DEFAULT;
+    if (!request_frame(C4004_CTRL_DETECTION_RANGE, C4004_CMD_SET_RANGE,
+                       &mode, 1, &s_work_packet, C4004_DEFAULT_TIMEOUT_MS)) {
+        ESP_LOGW(TAG, "set detection range (side default) timeout");
+        return ESP_ERR_TIMEOUT;
+    }
+    ESP_LOGI(TAG, "detection range: side default");
+    return ESP_OK;
+
+#elif CONFIG_C4004_RANGE_MODE_FIT_TAGS
     if (cfg == NULL || cfg->tag_count == 0) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -711,27 +904,15 @@ static esp_err_t sync_detection_range(const area_config_t *cfg)
     }
 
     const float margin = 80.0f;
-    min_x -= margin;
-    max_x += margin;
-    min_y -= margin;
-    max_y += margin;
+    return set_four_side_range_cm(min_x - margin, max_x + margin, min_y - margin, max_y + margin);
 
-    uint8_t data[9];
-    data[0] = C4004_RANGE_FOUR_SIDE;
-    write_sign_i16(&data[1], (int16_t)max_x);
-    write_sign_i16(&data[3], (int16_t)min_x);
-    write_sign_i16(&data[5], (int16_t)max_y);
-    write_sign_i16(&data[7], (int16_t)min_y);
-
-    if (!request_frame(C4004_CTRL_DETECTION_RANGE, C4004_CMD_SET_RANGE,
-                       data, sizeof(data), &s_work_packet, C4004_DEFAULT_TIMEOUT_MS)) {
-        ESP_LOGW(TAG, "set detection range timeout");
-        return ESP_ERR_TIMEOUT;
-    }
-
-    ESP_LOGI(TAG, "detection range x=[%.0f,%.0f] y=[%.0f,%.0f] cm",
-             min_x, max_x, min_y, max_y);
-    return ESP_OK;
+#else /* CONFIG_C4004_RANGE_MODE_MAX */
+    (void)cfg;
+    return set_four_side_range_cm((float)(-CONFIG_C4004_RANGE_X_CM),
+                                  (float)CONFIG_C4004_RANGE_X_CM,
+                                  (float)CONFIG_C4004_RANGE_Y_NEG_CM,
+                                  (float)CONFIG_C4004_RANGE_Y_POS_CM);
+#endif
 }
 
 static uint8_t tag_type_to_strategy(uint8_t tag_type)
@@ -924,7 +1105,7 @@ static void c4004_health_task(void *arg)
         }
 
         area_config_t cfg = {0};
-        if (area_config_get(&cfg) != ESP_OK || !cfg.enabled || cfg.tag_count == 0) {
+        if (area_config_get(&cfg) != ESP_OK || cfg.tag_count == 0) {
             continue;
         }
 
@@ -1004,6 +1185,13 @@ static esp_err_t init_uart(void)
 
 esp_err_t c4004_sensor_start(void)
 {
+#if CONFIG_C4004_VERBOSE_LOG
+    esp_log_level_set("c4004", ESP_LOG_DEBUG);
+    esp_log_level_set("radar_area", ESP_LOG_DEBUG);
+    esp_log_level_set("radar_events", ESP_LOG_DEBUG);
+    ESP_LOGI(TAG, "verbose Debug log enabled (c4004/radar_area/radar_events)");
+#endif
+
     s_uart_lock = xSemaphoreCreateMutex();
     s_state_lock = xSemaphoreCreateMutex();
     if (s_uart_lock == NULL || s_state_lock == NULL) {
@@ -1033,6 +1221,27 @@ esp_err_t c4004_sensor_start(void)
         ESP_LOGW(TAG, "check-to-active frames setup failed");
     }
 
+    /* 等加速度计至少采到一帧，再按倾角配置安装角 */
+#if CONFIG_SC7A20H_ENABLE
+    vTaskDelay(pdMS_TO_TICKS(CONFIG_SC7A20H_POLL_INTERVAL_MS + 50));
+#else
+    vTaskDelay(pdMS_TO_TICKS(50));
+#endif
+    if (!sync_install_from_accel()) {
+        ESP_LOGW(TAG, "install sync from accel failed (radar still usable)");
+    }
+
+#if !CONFIG_C4004_RANGE_MODE_FIT_TAGS
+    /* 启动时同步探测框：优先 NVS 自定义范围，否则 Kconfig 最大/无边界 */
+    {
+        area_config_t cfg = {0};
+        (void)area_config_get(&cfg);
+        if (sync_detection_range(&cfg) != ESP_OK) {
+            ESP_LOGW(TAG, "detection range sync on start failed");
+        }
+    }
+#endif
+
     s_ready = true;
     ESP_LOGI(TAG, "C4004 ready (UART%d TX=%d RX=%d %dbps)",
              CONFIG_C4004_UART_PORT, CONFIG_C4004_UART_TX, CONFIG_C4004_UART_RX, CONFIG_C4004_UART_BAUD);
@@ -1057,7 +1266,12 @@ esp_err_t c4004_sensor_sync_tags(const area_config_t *cfg, uint8_t prev_count)
     if (!s_ready || cfg == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+
+    /* 区域变更时顺便刷新安装角（设备可能被挪动过） */
+    (void)sync_install_from_accel();
+
     if (cfg->tag_count == 0) {
+        ESP_LOGI(TAG, "no area tags in NVS, clear C4004 tags only");
         esp_err_t err = clear_all_tags_locked();
         xSemaphoreTake(s_state_lock, portMAX_DELAY);
         memset(s_tag_states, 0, sizeof(s_tag_states));
@@ -1084,10 +1298,19 @@ esp_err_t c4004_sensor_sync_tags(const area_config_t *cfg, uint8_t prev_count)
         clear_orphan_tags(cfg->tag_count, prev_count);
     }
 
+#if CONFIG_C4004_RANGE_MODE_FIT_TAGS
     esp_err_t range_err = sync_detection_range(cfg);
     if (range_err != ESP_OK) {
         ESP_LOGW(TAG, "detection range sync failed, continue");
     }
+#else
+    /* 有自定义检测范围时每次标签同步也刷新；否则启动已配置过 */
+    if (cfg->has_detection_range) {
+        if (sync_detection_range(cfg) != ESP_OK) {
+            ESP_LOGW(TAG, "detection range sync failed, continue");
+        }
+    }
+#endif
 
     if (prev_count == 0) {
         ESP_LOGI(TAG, "full sync %u tags to C4004", cfg->tag_count);
@@ -1217,7 +1440,7 @@ esp_err_t c4004_sensor_query_target(float *x, float *y, uint8_t *target_count, i
 
     if (count > 1) {
         for (uint8_t i = 0; i < count; i++) {
-            ESP_LOGI(TAG, "  target[%u] idx=%u kin=0x%02X pos=(%d,%d) spd=%d cm",
+            ESP_LOGD(TAG, "  target[%u] idx=%u kin=0x%02X pos=(%d,%d) spd=%d cm",
                      i, s_targets[i].index, s_targets[i].kinesia,
                      (int)s_targets[i].x, (int)s_targets[i].y, (int)s_targets[i].speed);
         }
@@ -1237,7 +1460,7 @@ esp_err_t c4004_sensor_query_target(float *x, float *y, uint8_t *target_count, i
     }
     xSemaphoreGive(s_state_lock);
 
-    ESP_LOGI(TAG, "query target: count=%u picked[%d]=(%.0f, %.0f) cm",
+    ESP_LOGD(TAG, "query target: count=%u picked[%d]=(%.0f, %.0f) cm",
              count, idx, (double)s_targets[idx].x, (double)s_targets[idx].y);
     return ESP_OK;
 }
@@ -1266,7 +1489,7 @@ esp_err_t c4004_sensor_count_targets_in_rect(const area_rect_t *rect, int *activ
         if (!point_in_rect(rect, target->x, target->y)) {
             continue;
         }
-        if (target->kinesia == 0x02) {
+        if (target_is_moving(target)) {
             (*active)++;
         } else {
             (*static_count)++;
@@ -1274,4 +1497,74 @@ esp_err_t c4004_sensor_count_targets_in_rect(const area_rect_t *rect, int *activ
     }
     xSemaphoreGive(s_state_lock);
     return ESP_OK;
+}
+
+esp_err_t c4004_sensor_sync_install(void)
+{
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return sync_install_from_accel() ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t c4004_sensor_get_targets(c4004_target_info_t *out, uint8_t max_count, uint8_t *out_count)
+{
+    if (out == NULL || out_count == NULL || max_count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_count = 0;
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    uint8_t n = s_target_count;
+    if (n > max_count) {
+        n = max_count;
+    }
+    for (uint8_t i = 0; i < n; i++) {
+        out[i].index = s_targets[i].index;
+        out[i].kinesia = s_targets[i].kinesia;
+        out[i].x_cm = s_targets[i].x;
+        out[i].y_cm = s_targets[i].y;
+        out[i].speed_cm_s = s_targets[i].speed;
+        out[i].moving = target_is_moving(&s_targets[i]);
+    }
+    *out_count = n;
+    xSemaphoreGive(s_state_lock);
+    return ESP_OK;
+}
+
+void c4004_sensor_get_fov_cm(int16_t *x_min, int16_t *x_max, int16_t *y_min, int16_t *y_max)
+{
+    /* 供 Web 地图投影：始终按侧装雷达最大探测包络（约 4m×7m），不随 RANGE_MODE 缩框。 */
+#ifdef CONFIG_C4004_RANGE_X_CM
+    int16_t xmin = (int16_t)(-CONFIG_C4004_RANGE_X_CM);
+    int16_t xmax = (int16_t)CONFIG_C4004_RANGE_X_CM;
+#else
+    int16_t xmin = -200;
+    int16_t xmax = 200;
+#endif
+#ifdef CONFIG_C4004_RANGE_Y_NEG_CM
+    int16_t ymin = (int16_t)CONFIG_C4004_RANGE_Y_NEG_CM; /* 已是 ≤0 */
+#else
+    int16_t ymin = 0;
+#endif
+#ifdef CONFIG_C4004_RANGE_Y_POS_CM
+    int16_t ymax = (int16_t)CONFIG_C4004_RANGE_Y_POS_CM;
+#else
+    int16_t ymax = 700;
+#endif
+    if (x_min) {
+        *x_min = xmin;
+    }
+    if (x_max) {
+        *x_max = xmax;
+    }
+    if (y_min) {
+        *y_min = ymin;
+    }
+    if (y_max) {
+        *y_max = ymax;
+    }
 }

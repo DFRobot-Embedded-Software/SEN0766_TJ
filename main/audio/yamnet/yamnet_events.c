@@ -20,6 +20,8 @@ static const char *TAG = "yamnet_evt";
 #define CLS_SPEECH           0
 #define CLS_CRY_SOBBING      19
 #define CLS_BABY_CRY         20
+#define CLS_WHIMPER          21
+#define CLS_WAIL_MOAN        22
 #define CLS_GLASS            435
 #define CLS_SHATTER          437
 #define CLS_SMASH_CRASH      463
@@ -44,10 +46,11 @@ static const yamnet_event_desc_t s_event_table[] = {
     {
         .id = "cry",
         .log_name = "CRY",
-        .class_ids = {CLS_CRY_SOBBING, CLS_BABY_CRY, -1, -1},
-        .class_count = 2,
-        /* Soft distill scores: real cry often 0.25–0.50; ambient Vehicle << 0.05 */
-        .score_thr_milli = 180,
+        /* 婴儿哭声优先：Baby cry + Crying/sobbing，并纳入 Whimper / Wail */
+        .class_ids = {CLS_BABY_CRY, CLS_CRY_SOBBING, CLS_WHIMPER, CLS_WAIL_MOAN},
+        .class_count = 4,
+        /* Soft distill：真哭声常 0.25–0.50；略降阈以便现场上报 */
+        .score_thr_milli = 150,
         .vote_window = 5,
         .vote_need = 2,
         .hold_ms = CONFIG_YAMNET_EVENT_HOLD_MS,
@@ -88,6 +91,9 @@ typedef struct {
 } event_runtime_t;
 
 static event_runtime_t s_rt[YAMNET_EVENT_MAX];
+static char s_last_event_id[24];
+static char s_last_event_label[32];
+static int64_t s_last_event_us;
 
 static float class_at(const float *probs, int n_classes, int class_id)
 {
@@ -196,9 +202,30 @@ void yamnet_events_on_probs(const float *probs,
                 rt->last_alert_us = now_us;
                 ESP_LOGW(TAG, "%s_ALERT score=%.3f votes=%d/%u",
                          ev->log_name, score, votes, (unsigned)ev->vote_window);
+                strncpy(s_last_event_id, ev->id, sizeof(s_last_event_id) - 1);
+                s_last_event_id[sizeof(s_last_event_id) - 1] = '\0';
+                /* 中文展示名供 Web 声音事件 */
+                if (strcmp(ev->id, "cry") == 0) {
+                    strncpy(s_last_event_label, "婴儿哭泣", sizeof(s_last_event_label) - 1);
+                } else if (strcmp(ev->id, "glass") == 0) {
+                    strncpy(s_last_event_label, "检测到玻璃碎裂", sizeof(s_last_event_label) - 1);
+                } else if (strcmp(ev->id, "alarm") == 0) {
+                    strncpy(s_last_event_label, "检测到警报声", sizeof(s_last_event_label) - 1);
+                } else {
+                    strncpy(s_last_event_label, ev->log_name, sizeof(s_last_event_label) - 1);
+                }
+                s_last_event_label[sizeof(s_last_event_label) - 1] = '\0';
+                s_last_event_us = now_us;
                 if (alert_cb) {
                     alert_cb(ev, score, votes, user_ctx);
                 }
+            } else if (strcmp(ev->id, "cry") == 0) {
+                /* 持续哭声：刷新时间戳，Web 声音事件保持「刚刚」 */
+                strncpy(s_last_event_id, "cry", sizeof(s_last_event_id) - 1);
+                s_last_event_id[sizeof(s_last_event_id) - 1] = '\0';
+                strncpy(s_last_event_label, "婴儿哭泣", sizeof(s_last_event_label) - 1);
+                s_last_event_label[sizeof(s_last_event_label) - 1] = '\0';
+                s_last_event_us = now_us;
             }
         } else if (rt->active && votes == 0) {
             rt->active = false;
@@ -231,4 +258,24 @@ const yamnet_event_desc_t *yamnet_events_get(int index)
         return NULL;
     }
     return &s_event_table[index];
+}
+
+bool yamnet_events_get_last(char *type_out, size_t type_len, char *label_out, size_t label_len, uint32_t *age_ms)
+{
+    if (s_last_event_us == 0 || s_last_event_id[0] == '\0') {
+        return false;
+    }
+    if (type_out != NULL && type_len > 0) {
+        strncpy(type_out, s_last_event_id, type_len - 1);
+        type_out[type_len - 1] = '\0';
+    }
+    if (label_out != NULL && label_len > 0) {
+        strncpy(label_out, s_last_event_label, label_len - 1);
+        label_out[label_len - 1] = '\0';
+    }
+    if (age_ms != NULL) {
+        int64_t age = (esp_timer_get_time() - s_last_event_us) / 1000;
+        *age_ms = age > 0 ? (uint32_t)age : 0;
+    }
+    return true;
 }

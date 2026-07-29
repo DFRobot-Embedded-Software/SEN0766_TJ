@@ -21,10 +21,6 @@ typedef struct {
     int co2;
     bool lux_ready;
     float lux;
-    bool accel_ready;
-    float ax;
-    float ay;
-    float az;
     uint8_t area_count;
     area_status_t areas[AREA_TAG_MAX];
 } sensor_snapshot_t;

@@ -1,0 +1,86 @@
+/* 页面状态、WiFi布局、统一反馈和最小字号规范 */
+#page-wifi { max-width: 1400px; margin: 0 auto; }
+#page-ota { max-width: 980px; }
+.ota-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.ota-hero { margin-top: 18px; background: #edf5ff; border-radius: 9px; padding: 23px; display: flex; align-items: center; gap: 17px; }
+.ota-hero img { width: 50px; height: 50px; }
+.ota-hero small { color: #7a8598; }
+.ota-hero h3 { font-size: 20px; margin: 6px 0; }
+.ota-hero p { color: #627089; margin: 0; }
+.ota-tip { margin-top: 18px; padding: 15px; border: 1px solid #dce8ff; background: #f7faff; border-radius: 8px; color: #66738a; line-height: 1.7; font-size: 12px; }
+.ota-upload h3 { margin-bottom: 16px; }
+.ota-file { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 12px 14px; border: 1px dashed #b7c7e2; border-radius: 8px; background: #f8fbff; color: #4f5d73; font-weight: 600; cursor: pointer; margin-bottom: 10px; }
+.ota-file-name { margin-top: 4px; font-weight: 500; color: #667085; font-size: 12px; }
+.ota-hero p { color: #627089; margin: 0; }
+#otaStorage { margin-top: 4px !important; }
+.ota-file input { max-width: 180px; }
+.ota-progress { margin: 18px 0 8px; height: 10px; border-radius: 999px; background: #e8eef8; overflow: hidden; }
+.ota-progress > div { width: 0; height: 100%; background: linear-gradient(90deg,#1265ee,#3b82f6); transition: width .15s linear; }
+.ota-progress-meta { display: flex; justify-content: space-between; color: #778296; font-size: 12px; margin-bottom: 16px; }
+#startOta { margin-top: 4px; }
+
+#page-logs { max-width: 1100px; }
+.log-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.log-panel { padding: 16px; }
+.log-toolbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+.log-toolbar label { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; color: #5f6879; }
+.log-toolbar input[type="text"], .log-toolbar #logFilter { height: 36px; min-width: 180px; border: 1px solid var(--border); border-radius: 6px; padding: 0 10px; background: #fff; font-weight: 500; }
+.log-follow { font-weight: 600 !important; }
+.log-meta { margin-left: auto; color: #8a94a6; font-size: 12px; }
+.log-view { margin: 0; height: min(62vh, 560px); overflow: auto; border: 1px solid #d9e2f1; border-radius: 8px; background: #0f172a; color: #e2e8f0; padding: 14px 16px; font: 12px/1.55 Consolas, "Courier New", monospace; white-space: pre-wrap; word-break: break-word; }
+#page-wifi .networks > h3 { margin-bottom: 18px; }
+#page-wifi .connect { margin-top: 18px; }
+#page-wifi .wifi-layout { gap: 14px; }
+#page-wifi .network-empty { min-height: 220px; display: flex; align-items: center; justify-content: center; color: #778296; }
+.disconnect-wifi { height: 36px; margin-left: auto; padding: 0 14px; border: 1px solid #ef9a9a; border-radius: 7px; background: #fff; color: #d64545; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.disconnect-wifi:hover { background: #fff2f2; border-color: #d64545; }
+.disconnect-wifi:focus-visible { outline: 0; box-shadow: 0 0 0 3px rgba(214,69,69,.15); }
+
+.empty-state { min-height: 230px; padding: 30px 20px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+.empty-state img { width: 48px; height: 48px; margin-bottom: 16px; opacity: .5; }
+.empty-state h3 { margin: 0 0 10px; font-size: 18px; }
+.empty-state p { max-width: 320px; margin: 0; color: #778296; font-size: 13px; line-height: 1.7; }
+
+.state-banner { margin: 0 0 13px; padding: 14px 18px; border: 1px solid #f2c56b; border-radius: 9px; background: #fff8e8; color: #8b5d10; display: flex; align-items: center; gap: 14px; }
+.state-banner b { font-size: 14px; }
+.state-banner span { font-size: 12px; }
+.data-muted { opacity: .5; filter: grayscale(.15); }
+
+.radar-event { min-height: 48px; margin-top: 12px; padding: 10px 13px; border: 1px solid #dbe6f8; border-radius: 7px; background: #f7faff; display: grid; grid-template-columns: 76px 1fr auto; align-items: center; gap: 10px; }
+.radar-event span { color: #667085; font-size: 12px; }
+.radar-event b { overflow: hidden; color: #1265ee; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.radar-event small { color: #8a94a6; font-size: 12px; }
+
+/* 所有反馈统一为页面中央固定尺寸弹框。 */
+.toast { position: fixed !important; z-index: 80 !important; top: 50% !important; left: 50% !important; right: auto !important; bottom: auto !important; width: 340px; min-height: 92px; padding: 22px 26px !important; border: 1px solid rgba(255,255,255,.28); border-radius: 12px !important; background: #1265ee !important; color: #fff; display: flex; align-items: center; justify-content: center; text-align: center; font-size: 14px !important; font-weight: 600; line-height: 1.6; box-shadow: 0 18px 50px rgba(18,101,238,.3); opacity: 0; transform: translate(-50%,-46%) scale(.96); transition: opacity .18s ease,transform .18s ease !important; pointer-events: none; }
+.toast.show { opacity: 1; transform: translate(-50%,-50%) scale(1); }
+.toast.error { background: #d64545 !important; box-shadow: 0 18px 50px rgba(214,69,69,.28); }
+.confirm-shade { position: fixed; z-index: 79; inset: 0; padding: 20px; background: rgba(20,31,50,.4); display: flex; align-items: center; justify-content: center; }
+.confirm-box { width: 340px; min-height: 190px; padding: 26px; border: 1px solid #dbe6f8; border-radius: 12px; background: #fff; box-shadow: 0 22px 60px rgba(20,31,50,.24); display: flex; flex-direction: column; justify-content: center; text-align: center; }
+.confirm-box h3 { margin: 0 0 12px; color: #172033; font-size: 18px; }
+.confirm-box p { min-height: 42px; margin: 0 0 22px; color: #667085; font-size: 13px; line-height: 1.6; }
+.confirm-box > div { display: flex; justify-content: center; gap: 10px; }
+.confirm-box button { min-width: 92px; height: 38px; }
+
+/* 文字最小字号为12px；图标内部数字不受影响。 */
+small,.meta,.device-id,.badge,.health-badge,.metric-health,.map-legend,.region-table-head,.region-table-row,.row-edit,.row-delete,.recapture,.point-row em,.sensor-head,.sensor-row,.wifi-tip,.title > span { font-size: 12px !important; }
+input,select,button,label,p,span,b { line-height: 1.45; }
+
+@media(max-width:760px) {
+  #page-wifi { width: 100%; }
+  #page-wifi .wifi-layout { gap: 10px; }
+  #page-wifi .networks > h3 { margin-bottom: 14px; }
+  .ota-layout { grid-template-columns: 1fr; }
+  .ota-file { flex-direction: column; align-items: flex-start; }
+  .ota-file input { max-width: 100%; width: 100%; }
+  .log-actions { width: 100%; }
+  .log-actions button { flex: 1; }
+  .log-meta { margin-left: 0; width: 100%; }
+  .log-view { height: 55vh; }
+  .state-banner { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .radar-event { grid-template-columns: 72px 1fr; }
+  .radar-event small { grid-column: 2; }
+  .toast { width: calc(100vw - 40px); max-width: 340px; min-height: 88px; padding: 20px !important; }
+  #page-wifi .wifi-hero { flex-wrap: wrap; }
+  .disconnect-wifi { width: 100%; margin: 8px 0 0; }
+}

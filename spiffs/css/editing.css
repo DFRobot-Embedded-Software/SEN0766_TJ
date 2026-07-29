@@ -1,0 +1,39 @@
+.page-back {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  border: 1px solid #d6dfec;
+  border-radius: 8px;
+  background: #fff;
+  color: #1265ee;
+  font-size: 22px;
+  line-height: 1;
+}
+.page-back:hover { background: #edf4ff; }
+.title .with-back { position: relative; padding-left: 48px; }
+.title .with-back .page-back { position: absolute; left: 0; top: 50%; transform: translateY(-50%); }
+.calibration.editable-map { cursor: crosshair; }
+.point-coords { display: flex; align-items: center; gap: 5px; margin-top: 5px; }
+.point-coords label { display: flex; align-items: center; gap: 3px; color: #778296; font-size: 11px; }
+.point-coords input {
+  width: 62px;
+  height: 28px;
+  border: 1px solid #d8e0eb;
+  border-radius: 4px;
+  padding: 0 5px;
+  color: #172033;
+}
+.point-coords input:focus { outline: 2px solid #cfe0ff; border-color: #1265ee; }
+.point-coords small { color: #778296; }
+@media(max-width:760px) {
+  .point-row { grid-template-columns: 28px 1fr auto; }
+  .point-coords { flex-wrap: wrap; }
+  .point-coords input { width: 56px; }
+}
+
+/* 传感器接口字段可在同一列纵向排列，保持单页展示且不隐藏配置项。 */
+.sensor-fields { display: flex; flex-direction: column; justify-content: center; gap: 8px; }
+.sensor-fields:empty::after { content: "—"; color: #8b94a3; }
+.sensor-fields label { min-width: 0; }
+.sensor-fields input,
+.sensor-fields select { width: min(105px, 100%); }

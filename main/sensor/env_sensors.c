@@ -43,9 +43,5 @@ esp_err_t env_sensors_get(env_snapshot_t *out)
         out->lux_ready = true;
     }
 
-    if (sc7a20h_sensor_get(&out->ax, &out->ay, &out->az) == ESP_OK) {
-        out->accel_ready = true;
-    }
-
     return ESP_OK;
 }

@@ -38,6 +38,8 @@ static int s_sink_id = -1;
 static TaskHandle_t s_feed_task;
 static TaskHandle_t s_fetch_task;
 static volatile bool s_running;
+static esp_sr_wake_cb_t s_wake_cb;
+static void *s_wake_cb_ctx;
 static bool s_started;
 
 static void make_room(size_t need_bytes)
@@ -131,6 +133,9 @@ static void fetch_task(void *arg)
         if (res->wakeup_state == WAKENET_DETECTED) {
             ESP_LOGI(TAG, "WAKEWORD DETECTED (word_index=%d model_index=%d)",
                      res->wake_word_index, res->wakenet_model_index);
+            if (s_wake_cb) {
+                s_wake_cb(s_wake_cb_ctx);
+            }
 #if CONFIG_ESP_SR_WAKE_START_STREAM && CONFIG_AUDIO_STREAM_ENABLE
             esp_err_t err = audio_stream_start();
             if (err != ESP_OK) {
@@ -293,6 +298,12 @@ bool esp_sr_wake_is_running(void)
     return s_started;
 }
 
+void esp_sr_wake_set_callback(esp_sr_wake_cb_t cb, void *user_ctx)
+{
+    s_wake_cb = cb;
+    s_wake_cb_ctx = user_ctx;
+}
+
 #else /* !CONFIG_ESP_SR_WAKE_ENABLE */
 
 esp_err_t esp_sr_wake_start(void)
@@ -306,6 +317,12 @@ void esp_sr_wake_stop(void) {}
 bool esp_sr_wake_is_running(void)
 {
     return false;
+}
+
+void esp_sr_wake_set_callback(esp_sr_wake_cb_t cb, void *user_ctx)
+{
+    (void)cb;
+    (void)user_ctx;
 }
 
 #endif /* CONFIG_ESP_SR_WAKE_ENABLE */

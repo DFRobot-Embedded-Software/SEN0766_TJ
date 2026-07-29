@@ -1,5 +1,7 @@
 #include "web_server.h"
 
+#include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -10,16 +12,37 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "board_snapshot.h"
+#include "c4004_sensor.h"
 #include "ota_update.h"
 #include "radar_area.h"
+#include "sc7a20h_sensor.h"
+#include "sensor_settings.h"
 #include "web_fs.h"
+#include "web_log.h"
 #include "captive_portal.h"
 #include "wifi_manager.h"
+#include "sdkconfig.h"
+
+#if CONFIG_YAMNET_ENABLE
+#include "yamnet_events.h"
+#endif
+#if CONFIG_ENV_SOUND_ENABLE
+#include "env_sound.h"
+#endif
 
 static const char *TAG = "web_server";
 static httpd_handle_t s_server = NULL;
 static const char *s_index_page = "index.html";
 static bool s_provision_mode = false;
+
+/** 前端地图用米；固件/C4004 用厘米 */
+#define WEB_M_PER_CM 0.01f
+#define WEB_CM_PER_M 100.0f
+
+static double round1(double v)
+{
+    return round(v * 10.0) / 10.0;
+}
 
 typedef struct {
     char ssid[33];
@@ -141,6 +164,110 @@ static esp_err_t static_file_handler(httpd_req_t *req)
     return serve_spiffs_path(req, rel_path);
 }
 
+static cJSON *coords_cm_to_m_json(const float coords_cm[4][2])
+{
+    cJSON *arr = cJSON_CreateArray();
+    for (int p = 0; p < 4; p++) {
+        cJSON *pt = cJSON_CreateArray();
+        cJSON_AddItemToArray(pt, cJSON_CreateNumber(round1(coords_cm[p][0] * WEB_M_PER_CM)));
+        cJSON_AddItemToArray(pt, cJSON_CreateNumber(round1(coords_cm[p][1] * WEB_M_PER_CM)));
+        cJSON_AddItemToArray(arr, pt);
+    }
+    return arr;
+}
+
+static bool parse_tag_coords_m(const cJSON *coords, area_tag_t *tag)
+{
+    if (!cJSON_IsArray(coords) || tag == NULL) {
+        return false;
+    }
+    for (int p = 0; p < 4; p++) {
+        const cJSON *pt = cJSON_GetArrayItem(coords, p);
+        if (pt == NULL || !cJSON_IsArray(pt) || cJSON_GetArraySize(pt) < 2) {
+            tag->coords[p][0] = 0.0f;
+            tag->coords[p][1] = 0.0f;
+            continue;
+        }
+        const cJSON *jx = cJSON_GetArrayItem(pt, 0);
+        const cJSON *jy = cJSON_GetArrayItem(pt, 1);
+        float xm = cJSON_IsNumber(jx) ? (float)jx->valuedouble : 0.0f;
+        float ym = cJSON_IsNumber(jy) ? (float)jy->valuedouble : 0.0f;
+        tag->coords[p][0] = xm * WEB_CM_PER_M;
+        tag->coords[p][1] = ym * WEB_CM_PER_M;
+    }
+    return true;
+}
+
+static bool parse_quad_coords_m(const cJSON *coords, float out_cm[4][2])
+{
+    if (!cJSON_IsArray(coords) || out_cm == NULL) {
+        return false;
+    }
+    for (int p = 0; p < 4; p++) {
+        const cJSON *pt = cJSON_GetArrayItem(coords, p);
+        if (pt == NULL || !cJSON_IsArray(pt) || cJSON_GetArraySize(pt) < 2) {
+            return false;
+        }
+        const cJSON *jx = cJSON_GetArrayItem(pt, 0);
+        const cJSON *jy = cJSON_GetArrayItem(pt, 1);
+        if (!cJSON_IsNumber(jx) || !cJSON_IsNumber(jy)) {
+            return false;
+        }
+        out_cm[p][0] = (float)jx->valuedouble * WEB_CM_PER_M;
+        out_cm[p][1] = (float)jy->valuedouble * WEB_CM_PER_M;
+    }
+    return true;
+}
+
+static void fill_tag_from_json(const cJSON *root, area_tag_t *tag)
+{
+    memset(tag, 0, sizeof(*tag));
+    const cJSON *strategy = cJSON_GetObjectItem(root, "strategy");
+    const cJSON *name = cJSON_GetObjectItem(root, "name");
+    const cJSON *setting = cJSON_GetObjectItem(root, "setting");
+    const cJSON *coords = cJSON_GetObjectItem(root, "coords");
+    if (cJSON_IsNumber(strategy)) {
+        tag->strategy = (uint8_t)strategy->valueint;
+    }
+    if (cJSON_IsString(name) && name->valuestring != NULL) {
+        strncpy(tag->name, name->valuestring, sizeof(tag->name) - 1);
+    }
+    if (cJSON_IsString(setting) && setting->valuestring != NULL) {
+        strncpy(tag->setting, setting->valuestring, sizeof(tag->setting) - 1);
+    }
+    parse_tag_coords_m(coords, tag);
+}
+
+static const char *point_in_region_name(const area_config_t *cfg, float x_cm, float y_cm)
+{
+    if (cfg == NULL) {
+        return NULL;
+    }
+    for (uint8_t i = 0; i < cfg->tag_count; i++) {
+        const area_tag_t *tag = &cfg->tags[i];
+        float min_x = tag->coords[0][0], max_x = tag->coords[0][0];
+        float min_y = tag->coords[0][1], max_y = tag->coords[0][1];
+        for (int p = 1; p < 4; p++) {
+            if (tag->coords[p][0] < min_x) {
+                min_x = tag->coords[p][0];
+            }
+            if (tag->coords[p][0] > max_x) {
+                max_x = tag->coords[p][0];
+            }
+            if (tag->coords[p][1] < min_y) {
+                min_y = tag->coords[p][1];
+            }
+            if (tag->coords[p][1] > max_y) {
+                max_y = tag->coords[p][1];
+            }
+        }
+        if (x_cm >= min_x && x_cm <= max_x && y_cm >= min_y && y_cm <= max_y) {
+            return tag->name;
+        }
+    }
+    return NULL;
+}
+
 static esp_err_t api_data_handler(httpd_req_t *req)
 {
     sensor_snapshot_t snapshot = {0};
@@ -149,39 +276,82 @@ static esp_err_t api_data_handler(httpd_req_t *req)
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "env_ready", snapshot.env_ready);
 
-    char temp_buf[16];
-    char hum_buf[16];
     if (snapshot.env_ready) {
-        snprintf(temp_buf, sizeof(temp_buf), "%.1f°C", snapshot.temperature);
-        snprintf(hum_buf, sizeof(hum_buf), "%.1f%%", snapshot.humidity);
-        cJSON_AddStringToObject(root, "temp", temp_buf);
-        cJSON_AddStringToObject(root, "humidity", hum_buf);
+        cJSON_AddNumberToObject(root, "temp", round1(snapshot.temperature));
+        cJSON_AddNumberToObject(root, "humidity", round1(snapshot.humidity));
         cJSON_AddNumberToObject(root, "co2", snapshot.co2);
     } else {
-        cJSON_AddStringToObject(root, "temp", "--");
-        cJSON_AddStringToObject(root, "humidity", "--");
+        cJSON_AddNullToObject(root, "temp");
+        cJSON_AddNullToObject(root, "humidity");
         cJSON_AddNullToObject(root, "co2");
     }
 
     cJSON_AddBoolToObject(root, "lux_ready", snapshot.lux_ready);
     if (snapshot.lux_ready) {
-        cJSON_AddNumberToObject(root, "lux", snapshot.lux);
+        const int lux_i = (int)lround(snapshot.lux);
+        cJSON_AddNumberToObject(root, "lux", lux_i);
+        cJSON_AddNumberToObject(root, "light", lux_i);
     } else {
         cJSON_AddNullToObject(root, "lux");
+        cJSON_AddNullToObject(root, "light");
     }
 
-    cJSON_AddBoolToObject(root, "accel_ready", snapshot.accel_ready);
-    if (snapshot.accel_ready) {
-        cJSON_AddNumberToObject(root, "ax", snapshot.ax);
-        cJSON_AddNumberToObject(root, "ay", snapshot.ay);
-        cJSON_AddNumberToObject(root, "az", snapshot.az);
+#if CONFIG_YAMNET_ENABLE
+    char evt_type[24] = {0};
+    char evt_label[32] = {0};
+    uint32_t evt_age_ms = 0;
+    if (yamnet_events_get_last(evt_type, sizeof(evt_type), evt_label, sizeof(evt_label), &evt_age_ms)) {
+        /* 声音事件保留最近 24 小时 */
+        if (evt_age_ms <= 24u * 3600u * 1000u) {
+            cJSON *sound_event = cJSON_AddObjectToObject(root, "sound_event");
+            cJSON_AddStringToObject(sound_event, "id", evt_type);
+            cJSON_AddStringToObject(sound_event, "type", evt_label[0] ? evt_label : evt_type);
+            if (evt_age_ms < 5000) {
+                cJSON_AddStringToObject(sound_event, "time", "刚刚");
+            } else if (evt_age_ms < 60000) {
+                char buf[24];
+                snprintf(buf, sizeof(buf), "%u 秒前", (unsigned)(evt_age_ms / 1000));
+                cJSON_AddStringToObject(sound_event, "time", buf);
+            } else if (evt_age_ms < 3600000) {
+                char buf[24];
+                snprintf(buf, sizeof(buf), "%u 分钟前", (unsigned)(evt_age_ms / 60000));
+                cJSON_AddStringToObject(sound_event, "time", buf);
+            } else {
+                char buf[24];
+                snprintf(buf, sizeof(buf), "%u 小时前", (unsigned)(evt_age_ms / 3600000));
+                cJSON_AddStringToObject(sound_event, "time", buf);
+            }
+        } else {
+            cJSON_AddNullToObject(root, "sound_event");
+        }
     } else {
-        cJSON_AddNullToObject(root, "ax");
-        cJSON_AddNullToObject(root, "ay");
-        cJSON_AddNullToObject(root, "az");
+        cJSON_AddNullToObject(root, "sound_event");
     }
+#else
+    cJSON_AddNullToObject(root, "sound_event");
+#endif
+
+#if CONFIG_ENV_SOUND_ENABLE
+    float sound_db = 0.0f;
+    if (sensor_settings_sound_enabled() && env_sound_get_db(&sound_db)) {
+        sound_db += sensor_settings_sound_offset_db();
+        if (sound_db < 0.0f) {
+            sound_db = 0.0f;
+        } else if (sound_db > 140.0f) {
+            sound_db = 140.0f;
+        }
+        cJSON_AddNumberToObject(root, "sound", (int)lround(sound_db));
+    } else {
+        cJSON_AddNullToObject(root, "sound");
+    }
+#else
+    cJSON_AddNullToObject(root, "sound");
+#endif
 
     cJSON *areas = cJSON_AddArrayToObject(root, "areas");
+    int active_sum = 0;
+    int static_sum = 0;
+    cJSON *last_event = NULL;
     for (uint8_t i = 0; i < snapshot.area_count; i++) {
         const area_status_t *st = &snapshot.areas[i];
         cJSON *area = cJSON_CreateObject();
@@ -192,17 +362,107 @@ static esp_err_t api_data_handler(httpd_req_t *req)
         case 2:
             cJSON_AddBoolToObject(area, "enter", st->enter);
             cJSON_AddBoolToObject(area, "exit", st->exit);
+            if (st->enter || st->exit) {
+                cJSON_Delete(last_event);
+                last_event = cJSON_CreateObject();
+                cJSON_AddStringToObject(last_event, "name", st->name);
+                cJSON_AddStringToObject(last_event, "event", st->enter ? "进入" : "离开");
+                cJSON_AddStringToObject(last_event, "time", "刚刚");
+            }
             break;
         case 3:
             cJSON_AddBoolToObject(area, "approaching", st->approaching);
             cJSON_AddBoolToObject(area, "leaving", st->leaving);
+            if (st->approaching || st->leaving) {
+                cJSON_Delete(last_event);
+                last_event = cJSON_CreateObject();
+                cJSON_AddStringToObject(last_event, "name", st->name);
+                cJSON_AddStringToObject(last_event, "event", st->approaching ? "靠近" : "远离");
+                cJSON_AddStringToObject(last_event, "time", "刚刚");
+            }
             break;
         default:
             cJSON_AddNumberToObject(area, "active", st->active);
             cJSON_AddNumberToObject(area, "static", st->static_count);
+            active_sum += st->active;
+            static_sum += st->static_count;
             break;
         }
         cJSON_AddItemToArray(areas, area);
+    }
+
+    cJSON *mmwave = cJSON_AddObjectToObject(root, "mmwave");
+    const char *install_status = "unknown";
+    sc7a20h_tilt_t tilt = {0};
+    if (sc7a20h_sensor_get_tilt(&tilt) == ESP_OK) {
+        install_status = tilt.upright ? "normal" : "abnormal";
+    }
+    cJSON_AddStringToObject(mmwave, "install_status", install_status);
+
+    const char *detect_status = "offline";
+    if (c4004_sensor_is_ready()) {
+        detect_status = "detecting";
+    } else {
+        detect_status = "idle";
+    }
+    cJSON_AddStringToObject(mmwave, "detect_status", detect_status);
+
+    int16_t fov_xmin = 0, fov_xmax = 0, fov_ymin = 0, fov_ymax = 0;
+    c4004_sensor_get_fov_cm(&fov_xmin, &fov_xmax, &fov_ymin, &fov_ymax);
+    cJSON *fov = cJSON_AddObjectToObject(mmwave, "fov");
+    cJSON_AddNumberToObject(fov, "x_min", round1(fov_xmin * WEB_M_PER_CM));
+    cJSON_AddNumberToObject(fov, "x_max", round1(fov_xmax * WEB_M_PER_CM));
+    cJSON_AddNumberToObject(fov, "y_min", round1(fov_ymin * WEB_M_PER_CM));
+    cJSON_AddNumberToObject(fov, "y_max", round1(fov_ymax * WEB_M_PER_CM));
+
+    cJSON *targets = cJSON_AddArrayToObject(mmwave, "targets");
+    int traj_active = 0;
+    int traj_static = 0;
+    float tx = 0.0f, ty = 0.0f;
+    uint8_t tcount = 0;
+    int8_t picked = -1;
+    if (c4004_sensor_is_ready() &&
+        c4004_sensor_query_target(&tx, &ty, &tcount, &picked) == ESP_OK && tcount > 0) {
+        c4004_target_info_t infos[8];
+        uint8_t n = 0;
+        if (c4004_sensor_get_targets(infos, 8, &n) == ESP_OK) {
+            area_config_t cfg = {0};
+            area_config_get(&cfg);
+            for (uint8_t i = 0; i < n; i++) {
+                if (infos[i].moving) {
+                    traj_active++;
+                } else {
+                    traj_static++;
+                }
+                cJSON *t = cJSON_CreateObject();
+                cJSON_AddNumberToObject(t, "id", infos[i].index);
+                cJSON_AddNumberToObject(t, "x", round1(infos[i].x_cm * WEB_M_PER_CM));
+                cJSON_AddNumberToObject(t, "y", round1(infos[i].y_cm * WEB_M_PER_CM));
+                cJSON_AddNumberToObject(t, "speed", infos[i].speed_cm_s);
+                cJSON_AddNumberToObject(t, "kinesia", infos[i].kinesia);
+                cJSON_AddBoolToObject(t, "moving", infos[i].moving);
+                cJSON_AddBoolToObject(t, "picked", (int)i == (int)picked);
+                const char *region = point_in_region_name(&cfg, (float)infos[i].x_cm, (float)infos[i].y_cm);
+                cJSON_AddStringToObject(t, "region_name", region ? region : "未进入区域");
+                cJSON_AddNumberToObject(t, "stay_seconds", 0);
+                cJSON_AddItemToArray(targets, t);
+            }
+        }
+    }
+
+    /* 实时监测人数优先用轨迹；无目标时回退区域 Tag 汇总 */
+    if ((traj_active + traj_static) > 0) {
+        cJSON_AddNumberToObject(mmwave, "active_count", traj_active);
+        cJSON_AddNumberToObject(mmwave, "static_count", traj_static);
+    } else {
+        cJSON_AddNumberToObject(mmwave, "active_count", active_sum);
+        cJSON_AddNumberToObject(mmwave, "static_count", static_sum);
+    }
+    cJSON_AddNumberToObject(mmwave, "target_count", traj_active + traj_static);
+    if (last_event != NULL) {
+        cJSON_AddItemToObject(mmwave, "last_event", last_event);
+    } else {
+        cJSON_AddNullToObject(mmwave, "last_event");
     }
 
     esp_err_t err = send_json(req, root);
@@ -219,36 +479,15 @@ static cJSON *area_tags_to_json(const area_config_t *cfg)
         cJSON_AddNumberToObject(item, "id", i);
         cJSON_AddNumberToObject(item, "strategy", tag->strategy);
         cJSON_AddStringToObject(item, "name", tag->name);
-        cJSON *coords = cJSON_AddArrayToObject(item, "coords");
-        for (int p = 0; p < 4; p++) {
-            cJSON *pt = cJSON_CreateArray();
-            cJSON_AddItemToArray(pt, cJSON_CreateNumber(tag->coords[p][0]));
-            cJSON_AddItemToArray(pt, cJSON_CreateNumber(tag->coords[p][1]));
-            cJSON_AddItemToArray(coords, pt);
+        if (tag->setting[0] != '\0') {
+            cJSON_AddStringToObject(item, "setting", tag->setting);
+        } else {
+            cJSON_AddNullToObject(item, "setting");
         }
+        cJSON_AddItemToObject(item, "coords", coords_cm_to_m_json(tag->coords));
         cJSON_AddItemToArray(tags, item);
     }
     return tags;
-}
-
-static bool parse_tag_coords(const cJSON *coords, area_tag_t *tag)
-{
-    if (!cJSON_IsArray(coords)) {
-        return false;
-    }
-    for (int p = 0; p < 4; p++) {
-        const cJSON *pt = cJSON_GetArrayItem(coords, p);
-        if (pt == NULL || !cJSON_IsArray(pt) || cJSON_GetArraySize(pt) < 2) {
-            tag->coords[p][0] = 0.0f;
-            tag->coords[p][1] = 0.0f;
-            continue;
-        }
-        const cJSON *jx = cJSON_GetArrayItem(pt, 0);
-        const cJSON *jy = cJSON_GetArrayItem(pt, 1);
-        tag->coords[p][0] = cJSON_IsNumber(jx) ? (float)jx->valuedouble : 0.0f;
-        tag->coords[p][1] = cJSON_IsNumber(jy) ? (float)jy->valuedouble : 0.0f;
-    }
-    return true;
 }
 
 static esp_err_t api_config_get_handler(httpd_req_t *req)
@@ -257,8 +496,14 @@ static esp_err_t api_config_get_handler(httpd_req_t *req)
     area_config_get(&cfg);
 
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "enabled", cfg.enabled);
     cJSON_AddItemToObject(root, "tags", area_tags_to_json(&cfg));
+
+    if (cfg.has_detection_range) {
+        cJSON *range = cJSON_AddObjectToObject(root, "detection_range");
+        cJSON_AddItemToObject(range, "coords", coords_cm_to_m_json(cfg.detection_range));
+    } else {
+        cJSON_AddNullToObject(root, "detection_range");
+    }
 
     esp_err_t err = send_json(req, root);
     cJSON_Delete(root);
@@ -267,7 +512,7 @@ static esp_err_t api_config_get_handler(httpd_req_t *req)
 
 static esp_err_t api_config_post_handler(httpd_req_t *req)
 {
-    char body[768] = {0};
+    char body[1536] = {0};
     if (read_request_body(req, body, sizeof(body)) <= 0) {
         return send_json_error(req, "400 Bad Request", "invalid body");
     }
@@ -280,34 +525,47 @@ static esp_err_t api_config_post_handler(httpd_req_t *req)
     const cJSON *action = cJSON_GetObjectItem(root, "action");
     esp_err_t save_err = ESP_OK;
     const char *message = "操作成功";
+    int new_id = -1;
 
-    if (cJSON_IsString(action) && strcmp(action->valuestring, "enable") == 0) {
-        const cJSON *enabled = cJSON_GetObjectItem(root, "enabled");
-        if (!cJSON_IsBool(enabled)) {
-            cJSON_Delete(root);
-            return send_json_error(req, "400 Bad Request", "missing enabled");
-        }
-        save_err = area_config_set_enabled(cJSON_IsTrue(enabled));
-        message = cJSON_IsTrue(enabled) ? "区域配置已启用" : "区域配置已关闭";
-    } else if (cJSON_IsString(action) && strcmp(action->valuestring, "add_tag") == 0) {
-        const cJSON *strategy = cJSON_GetObjectItem(root, "strategy");
-        const cJSON *name = cJSON_GetObjectItem(root, "name");
+    if (cJSON_IsString(action) && strcmp(action->valuestring, "set_range") == 0) {
         const cJSON *coords = cJSON_GetObjectItem(root, "coords");
-        if (!cJSON_IsNumber(strategy) || !cJSON_IsString(name) || name->valuestring[0] == '\0') {
+        float range_cm[4][2] = {0};
+        if (!parse_quad_coords_m(coords, range_cm)) {
+            cJSON_Delete(root);
+            return send_json_error(req, "400 Bad Request", "invalid detection range coords");
+        }
+        save_err = area_config_set_detection_range(range_cm);
+        message = "检测范围已保存";
+    } else if (cJSON_IsString(action) && strcmp(action->valuestring, "add_tag") == 0) {
+        area_tag_t tag = {0};
+        fill_tag_from_json(root, &tag);
+        if (tag.name[0] == '\0') {
             cJSON_Delete(root);
             return send_json_error(req, "400 Bad Request", "missing tag fields");
         }
-        area_tag_t tag = {0};
-        tag.strategy = (uint8_t)strategy->valueint;
-        strncpy(tag.name, name->valuestring, sizeof(tag.name) - 1);
-        parse_tag_coords(coords, &tag);
         if (!area_coords_valid(&tag)) {
             cJSON_Delete(root);
             return send_json_error(req, "400 Bad Request",
                                    "请先获取 4 个有效坐标点（区域宽高至少 10cm）");
         }
-        save_err = area_config_add_tag(&tag);
+        uint8_t id = 0;
+        save_err = area_config_add_tag(&tag, &id);
+        new_id = id;
         message = "区域标签已添加";
+    } else if (cJSON_IsString(action) && strcmp(action->valuestring, "update_tag") == 0) {
+        const cJSON *id = cJSON_GetObjectItem(root, "id");
+        if (!cJSON_IsNumber(id)) {
+            cJSON_Delete(root);
+            return send_json_error(req, "400 Bad Request", "missing tag id");
+        }
+        area_tag_t tag = {0};
+        fill_tag_from_json(root, &tag);
+        if (tag.name[0] == '\0' || !area_coords_valid(&tag)) {
+            cJSON_Delete(root);
+            return send_json_error(req, "400 Bad Request", "invalid tag fields");
+        }
+        save_err = area_config_update_tag((uint8_t)id->valueint, &tag);
+        message = "区域标签已更新";
     } else if (cJSON_IsString(action) && strcmp(action->valuestring, "delete_tag") == 0) {
         const cJSON *id = cJSON_GetObjectItem(root, "id");
         if (!cJSON_IsNumber(id)) {
@@ -330,22 +588,23 @@ static esp_err_t api_config_post_handler(httpd_req_t *req)
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddBoolToObject(resp, "ok", true);
     cJSON_AddStringToObject(resp, "message", message);
+    if (new_id >= 0) {
+        cJSON_AddNumberToObject(resp, "id", new_id);
+    }
     esp_err_t err = send_json(req, resp);
     cJSON_Delete(resp);
     return err;
 }
 
-/** 从 C4004 读取当前目标坐标，供 Web 采集区域角点 */
+/** 从 C4004 读取当前目标坐标（返回米，供 Web 采集区域角点） */
 static esp_err_t api_coord_handler(httpd_req_t *req)
 {
     const char *point_str = NULL;
-    if (httpd_req_get_url_query_str(req, NULL, 0) > 0) {
-        char query[32];
-        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-            char value[8];
-            if (httpd_query_key_value(query, "point", value, sizeof(value)) == ESP_OK) {
-                point_str = value;
-            }
+    char query[32];
+    char value[8];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        if (httpd_query_key_value(query, "point", value, sizeof(value)) == ESP_OK) {
+            point_str = value;
         }
     }
 
@@ -364,8 +623,8 @@ static esp_err_t api_coord_handler(httpd_req_t *req)
     if (err == ESP_OK) {
         cJSON_AddBoolToObject(root, "ok", true);
         cJSON_AddNumberToObject(root, "point", point);
-        cJSON_AddNumberToObject(root, "x", x);
-        cJSON_AddNumberToObject(root, "y", y);
+        cJSON_AddNumberToObject(root, "x", round1(x * WEB_M_PER_CM));
+        cJSON_AddNumberToObject(root, "y", round1(y * WEB_M_PER_CM));
         cJSON_AddNumberToObject(root, "targets", target_count);
         if (picked_index >= 0) {
             cJSON_AddNumberToObject(root, "picked", picked_index);
@@ -376,8 +635,8 @@ static esp_err_t api_coord_handler(httpd_req_t *req)
         } else {
             cJSON_AddStringToObject(root, "message", "已从 C4004 读取目标坐标");
         }
-        ESP_LOGI(TAG, "coord point=%d x=%.0f y=%.0f targets=%u picked=%d",
-                 point, x, y, target_count, (int)picked_index);
+        ESP_LOGI(TAG, "coord point=%d x=%.2fm y=%.2fm targets=%u picked=%d",
+                 point, x * WEB_M_PER_CM, y * WEB_M_PER_CM, target_count, (int)picked_index);
     } else if (err == ESP_ERR_NOT_FOUND) {
         cJSON_AddBoolToObject(root, "ok", false);
         cJSON_AddNumberToObject(root, "point", point);
@@ -406,6 +665,7 @@ static esp_err_t api_wifi_get_handler(httpd_req_t *req)
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "configured", st.configured);
     cJSON_AddBoolToObject(root, "connected", st.connected);
+    cJSON_AddBoolToObject(root, "connecting", st.connecting);
     cJSON_AddBoolToObject(root, "ap_mode", st.ap_mode);
     cJSON_AddStringToObject(root, "ssid", st.ssid);
     cJSON_AddStringToObject(root, "password", st.password);
@@ -414,6 +674,15 @@ static esp_err_t api_wifi_get_handler(httpd_req_t *req)
     esp_err_t err = send_json(req, root);
     cJSON_Delete(root);
     return err;
+}
+
+static void wifi_disconnect_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(300));
+    web_server_stop();
+    wifi_manager_disconnect();
+    vTaskDelete(NULL);
 }
 
 static esp_err_t api_wifi_post_handler(httpd_req_t *req)
@@ -442,6 +711,22 @@ static esp_err_t api_wifi_post_handler(httpd_req_t *req)
         }
 
         if (xTaskCreate(wifi_reprovision_task, "wifi_reprov", 4096, NULL, 5, NULL) != pdPASS) {
+            return ESP_ERR_NO_MEM;
+        }
+        return ESP_OK;
+    }
+
+    if (cJSON_IsString(action) && strcmp(action->valuestring, "disconnect") == 0) {
+        cJSON_Delete(root);
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddBoolToObject(resp, "ok", true);
+        cJSON_AddStringToObject(resp, "message", "正在断开并返回配网热点…");
+        esp_err_t err = send_json(req, resp);
+        cJSON_Delete(resp);
+        if (err != ESP_OK) {
+            return err;
+        }
+        if (xTaskCreate(wifi_disconnect_task, "wifi_disc", 4096, NULL, 5, NULL) != pdPASS) {
             return ESP_ERR_NO_MEM;
         }
         return ESP_OK;
@@ -487,6 +772,89 @@ static esp_err_t api_wifi_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t api_wifi_scan_handler(httpd_req_t *req)
+{
+    wifi_scan_ap_t aps[24];
+    uint16_t count = 0;
+    esp_err_t scan_err = wifi_manager_scan(aps, 24, &count);
+
+    cJSON *root = cJSON_CreateObject();
+    if (scan_err != ESP_OK) {
+        cJSON_AddBoolToObject(root, "ok", false);
+        cJSON_AddStringToObject(root, "message", "WiFi 扫描失败");
+        cJSON_AddArrayToObject(root, "networks");
+        httpd_resp_set_status(req, "500 Internal Server Error");
+    } else {
+        cJSON_AddBoolToObject(root, "ok", true);
+        cJSON *networks = cJSON_AddArrayToObject(root, "networks");
+        for (uint16_t i = 0; i < count; i++) {
+            if (aps[i].ssid[0] == '\0') {
+                continue;
+            }
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "ssid", aps[i].ssid);
+            cJSON_AddNumberToObject(item, "rssi", aps[i].rssi);
+            cJSON_AddBoolToObject(item, "secure", aps[i].secure);
+            cJSON_AddStringToObject(item, "auth", aps[i].auth);
+            cJSON_AddItemToArray(networks, item);
+        }
+    }
+
+    esp_err_t err = send_json(req, root);
+    cJSON_Delete(root);
+    return err;
+}
+
+static esp_err_t api_sensors_get_handler(httpd_req_t *req)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON *sensors = sensor_settings_to_json();
+    if (sensors == NULL) {
+        cJSON_Delete(root);
+        return send_json_error(req, "500 Internal Server Error", "sensors unavailable");
+    }
+    cJSON_AddItemToObject(root, "sensors", sensors);
+    esp_err_t err = send_json(req, root);
+    cJSON_Delete(root);
+    return err;
+}
+
+static esp_err_t api_sensors_post_handler(httpd_req_t *req)
+{
+    char body[3072] = {0};
+    if (read_request_body(req, body, sizeof(body)) <= 0) {
+        return send_json_error(req, "400 Bad Request", "invalid body");
+    }
+
+    cJSON *root = cJSON_Parse(body);
+    if (root == NULL) {
+        return send_json_error(req, "400 Bad Request", "invalid json");
+    }
+
+    const cJSON *sensors = cJSON_GetObjectItem(root, "sensors");
+    esp_err_t save_err = sensor_settings_from_json(sensors);
+    cJSON_Delete(root);
+    if (save_err != ESP_OK) {
+        return send_json_error(req, "400 Bad Request", "invalid sensors payload");
+    }
+
+    /* 安装高度等毫米波参数变更后，立即下发到 C4004 */
+    if (c4004_sensor_is_ready()) {
+        esp_err_t sync_err = c4004_sensor_sync_install();
+        if (sync_err != ESP_OK) {
+            ESP_LOGW(TAG, "C4004 install sync after sensors save: %s", esp_err_to_name(sync_err));
+        }
+    }
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    cJSON_AddStringToObject(resp, "message", "传感器设置已保存");
+    esp_err_t err = send_json(req, resp);
+    cJSON_Delete(resp);
+    return err;
+}
+
 #define OTA_UPLOAD_CHUNK_SIZE 4096
 
 static void ota_reboot_task(void *arg)
@@ -505,28 +873,65 @@ static esp_err_t api_ota_get_handler(httpd_req_t *req)
     cJSON_AddStringToObject(root, "version", info.version);
     cJSON_AddStringToObject(root, "running", info.running_label);
     cJSON_AddBoolToObject(root, "pending_verify", info.pending_verify);
+    cJSON_AddNumberToObject(root, "storage_size", info.storage_size);
 
     esp_err_t err = send_json(req, root);
     cJSON_Delete(root);
     return err;
 }
 
-/** 前端以原始二进制 POST 整个 .bin（Content-Length 已知，非分块上传） */
+/** POST /api/ota?target=app|ui&reboot=0|1  原始二进制上传 */
 static esp_err_t api_ota_post_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0) {
-        return send_json_error(req, "400 Bad Request", "请选择固件文件");
+        return send_json_error(req, "400 Bad Request", "请选择升级文件");
     }
 
-    esp_err_t err = ota_update_begin();
-    if (err != ESP_OK) {
-        return send_json_error(req, "500 Internal Server Error",
-                               err == ESP_ERR_NOT_FOUND ? "没有可用的 OTA 分区" : "OTA 初始化失败");
+    char query[64] = {0};
+    char target[16] = "app";
+    bool do_reboot = true;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char buf[16];
+        if (httpd_query_key_value(query, "target", target, sizeof(target)) != ESP_OK) {
+            strncpy(target, "app", sizeof(target) - 1);
+        }
+        if (httpd_query_key_value(query, "reboot", buf, sizeof(buf)) == ESP_OK) {
+            do_reboot = !(buf[0] == '0' && buf[1] == '\0');
+        }
+    }
+
+    const bool is_ui = (strcmp(target, "ui") == 0 || strcmp(target, "storage") == 0);
+    if (!is_ui && strcmp(target, "app") != 0) {
+        return send_json_error(req, "400 Bad Request", "target 应为 app 或 ui");
+    }
+
+    esp_err_t err;
+    if (is_ui) {
+        err = ota_update_spiffs_begin((size_t)req->content_len);
+        if (err != ESP_OK) {
+            const char *msg = "网页分区升级初始化失败";
+            if (err == ESP_ERR_NOT_FOUND) {
+                msg = "未找到 storage 分区";
+            } else if (err == ESP_ERR_INVALID_SIZE) {
+                msg = "网页镜像过大或为空";
+            }
+            return send_json_error(req, "500 Internal Server Error", msg);
+        }
+    } else {
+        err = ota_update_begin();
+        if (err != ESP_OK) {
+            return send_json_error(req, "500 Internal Server Error",
+                                   err == ESP_ERR_NOT_FOUND ? "没有可用的 OTA 分区" : "OTA 初始化失败");
+        }
     }
 
     uint8_t *buf = malloc(OTA_UPLOAD_CHUNK_SIZE);
     if (buf == NULL) {
-        ota_update_abort();
+        if (is_ui) {
+            ota_update_spiffs_abort();
+        } else {
+            ota_update_abort();
+        }
         return send_json_error(req, "500 Internal Server Error", "内存不足");
     }
 
@@ -542,7 +947,9 @@ static esp_err_t api_ota_post_handler(httpd_req_t *req)
             write_failed = true;
             break;
         }
-        if (ota_update_write(buf, (size_t)received) != ESP_OK) {
+        err = is_ui ? ota_update_spiffs_write(buf, (size_t)received)
+                    : ota_update_write(buf, (size_t)received);
+        if (err != ESP_OK) {
             write_failed = true;
             break;
         }
@@ -551,28 +958,106 @@ static esp_err_t api_ota_post_handler(httpd_req_t *req)
     free(buf);
 
     if (write_failed) {
-        ota_update_abort();
-        ESP_LOGE(TAG, "OTA upload interrupted (%d bytes remaining)", remaining);
+        if (is_ui) {
+            ota_update_spiffs_abort();
+        } else {
+            ota_update_abort();
+        }
+        ESP_LOGE(TAG, "OTA upload interrupted (%s, %d bytes remaining)", target, remaining);
         return send_json_error(req, "500 Internal Server Error", "上传中断，请重试");
     }
 
-    err = ota_update_end();
+    err = is_ui ? ota_update_spiffs_end() : ota_update_end();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA end failed: %s", esp_err_to_name(err));
-        return send_json_error(req, "400 Bad Request", "固件校验失败，请确认文件正确且完整");
+        ESP_LOGE(TAG, "OTA end failed (%s): %s", target, esp_err_to_name(err));
+        return send_json_error(req, "400 Bad Request",
+                               is_ui ? "网页镜像写入失败，请确认是 build/storage.bin"
+                                     : "固件校验失败，请确认文件正确且完整");
     }
 
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddBoolToObject(resp, "ok", true);
-    cJSON_AddStringToObject(resp, "message", "升级成功，设备将在数秒后重启…");
+    cJSON_AddStringToObject(resp, "target", is_ui ? "ui" : "app");
+    if (is_ui && !do_reboot) {
+        cJSON_AddStringToObject(resp, "message", "网页已更新，可继续上传固件或强制刷新页面");
+    } else if (is_ui) {
+        cJSON_AddStringToObject(resp, "message", "网页已更新，设备将在数秒后重启…");
+    } else {
+        cJSON_AddStringToObject(resp, "message", "固件升级成功，设备将在数秒后重启…");
+    }
     esp_err_t send_err = send_json(req, resp);
     cJSON_Delete(resp);
 
-    ESP_LOGI(TAG, "OTA success, rebooting shortly");
-    if (xTaskCreate(ota_reboot_task, "ota_reboot", 2048, NULL, 5, NULL) != pdPASS) {
-        esp_restart();
+    if (do_reboot) {
+        ESP_LOGI(TAG, "OTA success (%s), rebooting shortly", target);
+        if (xTaskCreate(ota_reboot_task, "ota_reboot", 2048, NULL, 5, NULL) != pdPASS) {
+            esp_restart();
+        }
+    } else {
+        ESP_LOGI(TAG, "OTA success (%s), reboot skipped", target);
     }
     return send_err;
+}
+
+static esp_err_t api_logs_get_handler(httpd_req_t *req)
+{
+    char query[128] = {0};
+    uint32_t since = 0;
+    int limit = 100;
+    char tag[32] = {0};
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char buf[32];
+        if (httpd_query_key_value(query, "since", buf, sizeof(buf)) == ESP_OK) {
+            since = (uint32_t)strtoul(buf, NULL, 10);
+        }
+        if (httpd_query_key_value(query, "limit", buf, sizeof(buf)) == ESP_OK) {
+            limit = atoi(buf);
+        }
+        if (httpd_query_key_value(query, "tag", tag, sizeof(tag)) == ESP_OK) {
+            /* keep tag */
+        }
+    }
+
+    cJSON *root = web_log_to_json(since, tag[0] ? tag : NULL, limit);
+    if (root == NULL) {
+        return send_json_error(req, "500 Internal Server Error", "logs unavailable");
+    }
+    cJSON_AddBoolToObject(root, "ok", true);
+    esp_err_t err = send_json(req, root);
+    cJSON_Delete(root);
+    return err;
+}
+
+static esp_err_t api_logs_post_handler(httpd_req_t *req)
+{
+    char body[128] = {0};
+    int n = 0;
+    if (req->content_len > 0) {
+        n = read_request_body(req, body, sizeof(body));
+        if (n < 0) {
+            return send_json_error(req, "400 Bad Request", "invalid body");
+        }
+    }
+
+    cJSON *root = cJSON_Parse(body[0] ? body : "{\"action\":\"clear\"}");
+    if (root == NULL) {
+        return send_json_error(req, "400 Bad Request", "invalid json");
+    }
+    const cJSON *action = cJSON_GetObjectItem(root, "action");
+    if (!cJSON_IsString(action) || strcmp(action->valuestring, "clear") != 0) {
+        cJSON_Delete(root);
+        return send_json_error(req, "400 Bad Request", "unsupported action");
+    }
+    web_log_clear();
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    cJSON_AddStringToObject(resp, "message", "日志已清空");
+    esp_err_t err = send_json(req, resp);
+    cJSON_Delete(resp);
+    return err;
 }
 
 static esp_err_t captive_redirect_handler(httpd_req_t *req, httpd_err_code_t err)
@@ -593,8 +1078,13 @@ static void register_api_handlers(void)
     httpd_uri_t coord = {.uri = "/api/coord", .method = HTTP_GET, .handler = api_coord_handler};
     httpd_uri_t wifi_get = {.uri = "/api/wifi", .method = HTTP_GET, .handler = api_wifi_get_handler};
     httpd_uri_t wifi = {.uri = "/api/wifi", .method = HTTP_POST, .handler = api_wifi_post_handler};
+    httpd_uri_t wifi_scan = {.uri = "/api/wifi/scan", .method = HTTP_GET, .handler = api_wifi_scan_handler};
+    httpd_uri_t sensors_get = {.uri = "/api/sensors", .method = HTTP_GET, .handler = api_sensors_get_handler};
+    httpd_uri_t sensors_post = {.uri = "/api/sensors", .method = HTTP_POST, .handler = api_sensors_post_handler};
     httpd_uri_t ota_get = {.uri = "/api/ota", .method = HTTP_GET, .handler = api_ota_get_handler};
     httpd_uri_t ota_post = {.uri = "/api/ota", .method = HTTP_POST, .handler = api_ota_post_handler};
+    httpd_uri_t logs_get = {.uri = "/api/logs", .method = HTTP_GET, .handler = api_logs_get_handler};
+    httpd_uri_t logs_post = {.uri = "/api/logs", .method = HTTP_POST, .handler = api_logs_post_handler};
 
     httpd_register_uri_handler(s_server, &data);
     httpd_register_uri_handler(s_server, &cfg_get);
@@ -602,8 +1092,13 @@ static void register_api_handlers(void)
     httpd_register_uri_handler(s_server, &coord);
     httpd_register_uri_handler(s_server, &wifi_get);
     httpd_register_uri_handler(s_server, &wifi);
+    httpd_register_uri_handler(s_server, &wifi_scan);
+    httpd_register_uri_handler(s_server, &sensors_get);
+    httpd_register_uri_handler(s_server, &sensors_post);
     httpd_register_uri_handler(s_server, &ota_get);
     httpd_register_uri_handler(s_server, &ota_post);
+    httpd_register_uri_handler(s_server, &logs_get);
+    httpd_register_uri_handler(s_server, &logs_post);
 }
 
 static esp_err_t start_server(const char *index_page, bool provision_mode)
@@ -622,6 +1117,9 @@ static esp_err_t start_server(const char *index_page, bool provision_mode)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 32;
     config.stack_size = 10240;
+    /* OTA 固件上传可能较慢（尤其 SoftAP），拉长收发等待避免中途超时 */
+    config.recv_wait_timeout = 120;
+    config.send_wait_timeout = 120;
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.lru_purge_enable = true;
 

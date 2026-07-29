@@ -29,6 +29,12 @@ typedef void (*wifi_on_connected_cb_t)(const char *ip_addr);
 /** @brief 进入 AP 配网模式后的回调（用于启动配网 Web 服务） */
 typedef void (*wifi_on_ap_started_cb_t)(void);
 
+/** @brief 开始连接路由器（STA connecting） */
+typedef void (*wifi_on_connecting_cb_t)(void);
+
+/** @brief STA 连接失败并将回退 AP */
+typedef void (*wifi_on_connect_failed_cb_t)(void);
+
 /** @brief 初始化 NVS Flash（须在 app_main 最早期调用） */
 esp_err_t nvs_storage_init(void);
 
@@ -42,6 +48,13 @@ esp_err_t nvs_storage_init(void);
  * @param on_ap_started 进入 AP 模式后的回调
  */
 esp_err_t wifi_manager_init(wifi_on_connected_cb_t on_connected, wifi_on_ap_started_cb_t on_ap_started);
+
+/**
+ * @brief 注册配网进度灯效用回调（可传 NULL）
+ * @note 须在 wifi_manager_init 之后调用
+ */
+void wifi_manager_set_progress_cbs(wifi_on_connecting_cb_t on_connecting,
+                                   wifi_on_connect_failed_cb_t on_failed);
 
 /** @brief 开启 SoftAP 热点（SSID: MCP-Sensors-Setup，开放网络） */
 esp_err_t wifi_manager_start_ap(void);
@@ -66,11 +79,26 @@ esp_err_t wifi_manager_clear_config(void);
 typedef struct {
     bool configured;  /**< NVS 中是否已保存凭据 */
     bool connected;   /**< STA 是否已获取 IP */
+    bool connecting;  /**< STA 正在连接中 */
     bool ap_mode;     /**< 是否处于 AP 配网模式 */
     char ssid[33];
     char password[65];
     char ip[16];
 } wifi_status_t;
 
+/** @brief 扫描结果条目 */
+typedef struct {
+    char ssid[33];
+    int8_t rssi;
+    bool secure;
+    char auth[12];
+} wifi_scan_ap_t;
+
 /** @brief 读取当前 WiFi 配置与连接状态 */
 esp_err_t wifi_manager_get_status(wifi_status_t *status);
+
+/** @brief 扫描附近 AP（阻塞，最多 max_count 条） */
+esp_err_t wifi_manager_scan(wifi_scan_ap_t *out, uint16_t max_count, uint16_t *out_count);
+
+/** @brief 断开 STA、清除凭据并回到 AP 配网 */
+esp_err_t wifi_manager_disconnect(void);

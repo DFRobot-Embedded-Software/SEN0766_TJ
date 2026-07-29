@@ -5,7 +5,7 @@
 #include "sdkconfig.h"
 #include "ns4168_amp.h"
 #include "ws2812_led.h"
-#include "ws2812_fx.h"
+#include "rgb_ui.h"
 
 static const char *TAG = "mcp_sensors";
 
@@ -16,6 +16,7 @@ static const char *TAG = "mcp_sensors";
 #include "board_snapshot.h"
 #include "ota_update.h"
 #include "web_fs.h"
+#include "web_log.h"
 #include "web_server.h"
 #include "wifi_manager.h"
 #endif
@@ -28,24 +29,21 @@ static const char *TAG = "mcp_sensors";
 #include "esp_sr_wake.h"
 #endif
 #endif
-
-static void ws2812_show_idle(void)
-{
-    ws2812_fx_cfg_t fx = {
-        .mode = WS2812_FX_STATIC,
-        .u.stat = {
-            .on = true,
-            .r = 8,
-            .g = 8,
-            .b = 8,
-            .brightness = 255,
-            .range = ws2812_range_all(),
-        },
-    };
-    (void)ws2812_fx_start(&fx);
-}
+#if CONFIG_ENV_SOUND_ENABLE
+#include "env_sound.h"
+#endif
 
 #if !CONFIG_YAMNET_VERIFY_ONLY
+
+static void on_wifi_connecting(void)
+{
+    rgb_ui_set_net(RGB_NET_CONNECTING);
+}
+
+static void on_wifi_connect_failed(void)
+{
+    rgb_ui_set_net(RGB_NET_FAIL);
+}
 
 static void init_time_sync(void)
 {
@@ -68,6 +66,8 @@ static void on_wifi_connected(const char *ip_addr)
     ESP_LOGI(TAG, "WiFi connected:");
     ESP_LOGI(TAG, "  Web UI: http://%s or http://mcp-sensors.local", ip_addr);
     ESP_LOGI(TAG, "  MCP:    http://%s:%d%s", ip_addr, MCP_HTTP_PORT, MCP_ENDPOINT_URI);
+
+    rgb_ui_set_net(RGB_NET_OK);
 
     mdns_init();
     mdns_hostname_set("mcp-sensors");
@@ -103,6 +103,10 @@ static void on_wifi_connected(const char *ip_addr)
 
 static void on_ap_started(void)
 {
+    /* 失败闪灯会自行切回 AP_WAIT；其它进入 AP 的路径直接显示等待配网 */
+    if (rgb_ui_get_net() != RGB_NET_FAIL) {
+        rgb_ui_set_net(RGB_NET_AP_WAIT);
+    }
     mcp_server_stop();
     mdns_free();
     web_server_stop();
@@ -122,7 +126,8 @@ static void boot_ui(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "WS2812 init failed: %s", esp_err_to_name(err));
     } else {
-        ws2812_show_idle();
+        (void)rgb_ui_init();
+        rgb_ui_set_net(RGB_NET_SELFTEST);
     }
 
     err = ns4168_amp_init();
@@ -146,6 +151,8 @@ static esp_err_t boot_storage(void)
 static esp_err_t boot_network(void)
 {
     ESP_LOGI(TAG, "boot: phase4 network");
+    /* 须在 init 自动连网之前注册，否则会错过 CONNECTING 灯效 */
+    wifi_manager_set_progress_cbs(on_wifi_connecting, on_wifi_connect_failed);
     esp_err_t err = wifi_manager_init(on_wifi_connected, on_ap_started);
     if (err != ESP_OK) {
         return err;
@@ -159,6 +166,13 @@ static esp_err_t boot_network(void)
 #endif /* !YAMNET_VERIFY_ONLY */
 
 #if CONFIG_YAMNET_ENABLE
+static void on_wakeword(void *ctx)
+{
+    (void)ctx;
+    /* 唤醒成功灯效 → 自动进入拾音呼吸；超时回退下层 */
+    rgb_ui_set_voice(RGB_VOICE_WAKE_OK);
+}
+
 static void boot_audio(void)
 {
     ESP_LOGI(TAG, "boot: phase5 audio");
@@ -177,6 +191,7 @@ static void boot_audio(void)
 #endif
 
 #if CONFIG_ESP_SR_WAKE_ENABLE
+    esp_sr_wake_set_callback(on_wakeword, NULL);
     err = esp_sr_wake_start();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "esp-sr wake start failed: %s", esp_err_to_name(err));
@@ -184,6 +199,17 @@ static void boot_audio(void)
         ESP_LOGI(TAG, "esp-sr wake listening (say wake word)");
     }
 #endif
+}
+#endif
+
+#if CONFIG_ENV_SOUND_ENABLE
+static void boot_env_sound(void)
+{
+    ESP_LOGI(TAG, "boot: env sound level");
+    esp_err_t err = env_sound_start();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "env_sound start failed: %s", esp_err_to_name(err));
+    }
 }
 #endif
 
@@ -196,7 +222,8 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "WS2812 init failed: %s", esp_err_to_name(err));
     } else {
-        ws2812_show_idle();
+        (void)rgb_ui_init();
+        rgb_ui_set_net(RGB_NET_SELFTEST);
     }
 
     err = ns4168_amp_init();
@@ -211,8 +238,13 @@ void app_main(void)
     ESP_LOGE(TAG, "Enable CONFIG_YAMNET_ENABLE in menuconfig");
 #endif
 
+#if CONFIG_ENV_SOUND_ENABLE
+    boot_env_sound();
+#endif
+
 #else /* full application */
 
+    web_log_init();
     ESP_LOGI(TAG, "MCP Sensors starting...");
 
     esp_err_t err = boot_platform();
@@ -222,6 +254,7 @@ void app_main(void)
     }
 
     boot_ui();
+    
     boot_sensors();
 
     err = boot_storage();
@@ -238,6 +271,9 @@ void app_main(void)
 
 #if CONFIG_YAMNET_ENABLE
     boot_audio();
+#endif
+#if CONFIG_ENV_SOUND_ENABLE
+    boot_env_sound();
 #endif
 
 #endif /* YAMNET_VERIFY_ONLY */

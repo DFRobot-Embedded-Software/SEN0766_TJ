@@ -31,7 +31,7 @@ static void notify_area_config_changed(void)
 
 static void c4004_ensure_started(void)
 {
-    if (s_c4004_started || !s_area_config.enabled) {
+    if (s_c4004_started) {
         return;
     }
     if (c4004_sensor_start() == ESP_OK) {
@@ -55,6 +55,7 @@ static void c4004_sync_if_ready(uint8_t prev_count)
 static void c4004_boot_task(void *arg)
 {
     (void)arg;
+    /* 启动雷达；有标签则同步，无标签只清模块侧残留 */
     c4004_sync_if_ready(0);
     vTaskDelete(NULL);
 }
@@ -158,13 +159,25 @@ static esp_err_t area_config_save(void)
         return ESP_ERR_NO_MEM;
     }
 
-    cJSON_AddBoolToObject(root, "enabled", s_area_config.enabled);
+    cJSON_AddBoolToObject(root, "has_detection_range", s_area_config.has_detection_range);
+    if (s_area_config.has_detection_range) {
+        cJSON *range = cJSON_AddArrayToObject(root, "detection_range");
+        for (int p = 0; p < 4; p++) {
+            cJSON *pt = cJSON_CreateArray();
+            cJSON_AddItemToArray(pt, cJSON_CreateNumber(s_area_config.detection_range[p][0]));
+            cJSON_AddItemToArray(pt, cJSON_CreateNumber(s_area_config.detection_range[p][1]));
+            cJSON_AddItemToArray(range, pt);
+        }
+    }
     cJSON *tags = cJSON_AddArrayToObject(root, "tags");
     for (uint8_t i = 0; i < s_area_config.tag_count; i++) {
         const area_tag_t *tag = &s_area_config.tags[i];
         cJSON *item = cJSON_CreateObject();
         cJSON_AddNumberToObject(item, "strategy", tag->strategy);
         cJSON_AddStringToObject(item, "name", tag->name);
+        if (tag->setting[0] != '\0') {
+            cJSON_AddStringToObject(item, "setting", tag->setting);
+        }
         cJSON *coords = cJSON_AddArrayToObject(item, "coords");
         for (int p = 0; p < 4; p++) {
             cJSON *pt = cJSON_CreateArray();
@@ -245,9 +258,19 @@ static esp_err_t area_config_load(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    const cJSON *enabled = cJSON_GetObjectItem(root, "enabled");
-    if (cJSON_IsBool(enabled)) {
-        s_area_config.enabled = cJSON_IsTrue(enabled);
+    const cJSON *has_range = cJSON_GetObjectItem(root, "has_detection_range");
+    const cJSON *range = cJSON_GetObjectItem(root, "detection_range");
+    if (cJSON_IsTrue(has_range) && cJSON_IsArray(range) && cJSON_GetArraySize(range) >= 4) {
+        bool ok = true;
+        for (int p = 0; p < 4; p++) {
+            if (!parse_coord_point(cJSON_GetArrayItem(range, p),
+                                   &s_area_config.detection_range[p][0],
+                                   &s_area_config.detection_range[p][1])) {
+                ok = false;
+                break;
+            }
+        }
+        s_area_config.has_detection_range = ok;
     }
 
     const cJSON *tags = cJSON_GetObjectItem(root, "tags");
@@ -265,8 +288,13 @@ static esp_err_t area_config_load(void)
                 continue;
             }
             area_tag_t *tag = &s_area_config.tags[s_area_config.tag_count];
+            memset(tag, 0, sizeof(*tag));
             tag->strategy = (uint8_t)strategy->valueint;
             strncpy(tag->name, name->valuestring, sizeof(tag->name) - 1);
+            const cJSON *setting = cJSON_GetObjectItem(item, "setting");
+            if (cJSON_IsString(setting) && setting->valuestring != NULL) {
+                strncpy(tag->setting, setting->valuestring, sizeof(tag->setting) - 1);
+            }
             for (int p = 0; p < 4 && p < cJSON_GetArraySize(coords); p++) {
                 parse_coord_point(cJSON_GetArrayItem(coords, p),
                                   &tag->coords[p][0], &tag->coords[p][1]);
@@ -282,11 +310,12 @@ static esp_err_t area_config_load(void)
 void radar_area_init(void)
 {
     area_config_load();
+    ESP_LOGI(TAG, "area cfg: tags=%u has_range=%d",
+             (unsigned)s_area_config.tag_count, (int)s_area_config.has_detection_range);
 
-    if (s_area_config.enabled) {
-        if (xTaskCreate(c4004_boot_task, "c4004_boot", C4004_BOOT_TASK_STACK, NULL, 3, NULL) != pdPASS) {
-            ESP_LOGW(TAG, "C4004 boot task create failed");
-        }
+    /* 始终拉起 C4004（坐标/概览不依赖区域开关）；标签有则同步 */
+    if (xTaskCreate(c4004_boot_task, "c4004_boot", C4004_BOOT_TASK_STACK, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "C4004 boot task create failed");
     }
 }
 
@@ -297,7 +326,7 @@ esp_err_t radar_area_get_status(area_status_t areas[AREA_TAG_MAX], uint8_t *out_
     }
 
     *out_count = 0;
-    if (!s_area_config.enabled || s_area_config.tag_count == 0) {
+    if (s_area_config.tag_count == 0) {
         return ESP_OK;
     }
 
@@ -338,20 +367,7 @@ esp_err_t area_config_get(area_config_t *out)
     return ESP_OK;
 }
 
-esp_err_t area_config_set_enabled(bool enabled)
-{
-    s_area_config.enabled = enabled;
-    esp_err_t err = area_config_save();
-    if (err == ESP_OK && enabled) {
-        c4004_sync_if_ready(0);
-    }
-    if (err == ESP_OK) {
-        notify_area_config_changed();
-    }
-    return err;
-}
-
-esp_err_t area_config_add_tag(const area_tag_t *tag)
+esp_err_t area_config_add_tag(const area_tag_t *tag, uint8_t *out_id)
 {
     if (tag == NULL || tag->name[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
@@ -373,10 +389,54 @@ esp_err_t area_config_add_tag(const area_tag_t *tag)
 
     uint8_t prev_count = s_area_config.tag_count;
     s_area_config.tags[s_area_config.tag_count] = *tag;
+    if (out_id != NULL) {
+        *out_id = s_area_config.tag_count;
+    }
     s_area_config.tag_count++;
     esp_err_t err = area_config_save();
     if (err == ESP_OK) {
         c4004_sync_if_ready(prev_count);
+        notify_area_config_changed();
+    }
+    return err;
+}
+
+esp_err_t area_config_update_tag(uint8_t index, const area_tag_t *tag)
+{
+    if (tag == NULL || tag->name[0] == '\0' || index >= s_area_config.tag_count) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!area_coords_valid(tag)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    s_area_config.tags[index] = *tag;
+    esp_err_t err = area_config_save();
+    if (err == ESP_OK) {
+        c4004_sync_if_ready(s_area_config.tag_count);
+        notify_area_config_changed();
+    }
+    return err;
+}
+
+esp_err_t area_config_set_detection_range(const float coords[4][2])
+{
+    if (coords == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    area_tag_t probe = {0};
+    memcpy(probe.coords, coords, sizeof(probe.coords));
+    if (!area_coords_valid(&probe)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memcpy(s_area_config.detection_range, coords, sizeof(s_area_config.detection_range));
+    s_area_config.has_detection_range = true;
+
+    esp_err_t err = area_config_save();
+    if (err == ESP_OK) {
+        c4004_sync_if_ready(s_area_config.tag_count);
         notify_area_config_changed();
     }
     return err;

@@ -75,6 +75,51 @@ menu "1. 板级总线与传感器"
             depends on SC7A20H_ENABLE
             default 200
             range 50 60000
+
+        choice SC7A20H_UP_AXIS
+            prompt "竖直向上轴（设备立在地面时重力方向）"
+            depends on SC7A20H_ENABLE
+            default SC7A20H_UP_AXIS_Y
+            help
+                设备垂直立在地面时，该轴应接近 ±1g。装反时倾角符号会错，可改轴或开“反转前后倾”。
+
+            config SC7A20H_UP_AXIS_X
+                bool "X"
+            config SC7A20H_UP_AXIS_Y
+                bool "Y"
+            config SC7A20H_UP_AXIS_Z
+                bool "Z"
+        endchoice
+
+        choice SC7A20H_FORWARD_AXIS
+            prompt "向前倾斜轴（与竖直轴正交）"
+            depends on SC7A20H_ENABLE
+            default SC7A20H_FORWARD_AXIS_Z
+            help
+                设备向前倾时，该轴分量增大。须与竖直轴不同。
+
+            config SC7A20H_FORWARD_AXIS_X
+                bool "X"
+            config SC7A20H_FORWARD_AXIS_Y
+                bool "Y"
+            config SC7A20H_FORWARD_AXIS_Z
+                bool "Z"
+        endchoice
+
+        config SC7A20H_INVERT_TILT
+            bool "反转前后倾方向"
+            depends on SC7A20H_ENABLE
+            default n
+            help
+                若实测向前倾时 C4004 安装角方向反了，打开本项。
+
+        config SC7A20H_UPRIGHT_TOLERANCE_DEG
+            int "判定为垂直的容差 (度)"
+            depends on SC7A20H_ENABLE
+            default 10
+            range 1 45
+            help
+                |前后倾角| 小于该值视为垂直；垂直时向 C4004 下发安装角 0。
     endmenu
 
     menu "C4004 毫米波雷达 (UART)"
@@ -94,6 +139,90 @@ menu "1. 板级总线与传感器"
         config C4004_UART_BAUD
             int "波特率"
             default 115200
+
+        config C4004_VERBOSE_LOG
+            bool "毫米波详细调试日志 (Debug)"
+            default y
+            help
+                开启后将 c4004 / radar_area / radar_events 设为 Debug，
+                输出轨迹查询、目标坐标、人数修正等。调试完可在 menuconfig 关闭。
+                需配合 LOG_MAXIMUM_LEVEL >= Debug（工程 defaults 已设置）。
+
+        choice C4004_INSTALL_MODE
+            prompt "安装模式"
+            default C4004_INSTALL_MODE_SIDE
+            help
+                对应 DFRobot setInstallInfo：侧装 / 顶装。落地立放一般选侧装。
+
+            config C4004_INSTALL_MODE_SIDE
+                bool "侧装 (Side)"
+            config C4004_INSTALL_MODE_TOP
+                bool "顶装 (Top)"
+        endchoice
+
+        config C4004_INSTALL_HEIGHT_CM
+            int "安装高度 (cm)"
+            default 180
+            range 0 65535
+            help
+                下发给 C4004 的安装高度（网页未配置时的默认值）。侧装时多为雷达距地面高度。
+                网页「传感器设置 → 安装高度」保存后会覆盖此值并立即下发。
+
+        choice C4004_TILT_ANGLE_AXIS
+            prompt "SC7A20H 前后倾角写入 C4004 的哪个安装角"
+            default C4004_TILT_ANGLE_Z
+            help
+                官方文档强调 Z 轴安装角。加速度前后倾默认写入 zAngle，其余为 0。
+                垂直时全部为 0。
+
+            config C4004_TILT_ANGLE_X
+                bool "xAngle"
+            config C4004_TILT_ANGLE_Y
+                bool "yAngle"
+            config C4004_TILT_ANGLE_Z
+                bool "zAngle"
+        endchoice
+
+        choice C4004_RANGE_MODE
+            prompt "检测范围模式"
+            default C4004_RANGE_MODE_MAX
+            help
+                当前若用“贴合区域标签”，整体探测框会被缩小到标签外包络，导致可用距离变短。
+                推荐“最大四面边界”或“无边界”。
+
+            config C4004_RANGE_MODE_MAX
+                bool "最大四面边界（默认，侧装约 4m×7m）"
+            config C4004_RANGE_MODE_NO_BOUNDARY
+                bool "无边界 (eRangeNoBoundary)"
+            config C4004_RANGE_MODE_SIDE_DEFAULT
+                bool "侧装默认 (eRangeSideDefault)"
+            config C4004_RANGE_MODE_FIT_TAGS
+                bool "贴合区域标签外包络（旧行为）"
+        endchoice
+
+        config C4004_RANGE_X_CM
+            int "最大四面边界：左右半宽 X (cm)"
+            depends on C4004_RANGE_MODE_MAX
+            default 200
+            range 50 2000
+            help
+                下发 xPositive=+X、xNegative=-X。侧装最大约 ±2m（总宽 4m）。
+
+        config C4004_RANGE_Y_POS_CM
+            int "最大四面边界：前方 Y+ (cm)"
+            depends on C4004_RANGE_MODE_MAX
+            default 700
+            range 50 2000
+            help
+                雷达前方最大探测深度。C4004 侧装最大约 7m。
+
+        config C4004_RANGE_Y_NEG_CM
+            int "最大四面边界：后方 Y- (cm，通常 0)"
+            depends on C4004_RANGE_MODE_MAX
+            default 0
+            range -2000 0
+            help
+                侧装时一般设为 0（雷达背后不检）。
 
         config C4004_AUTO_RECOVER_ENABLE
             bool "启用自动恢复"
@@ -248,6 +377,29 @@ menu "2. 音频硬件 (ES7210 / NS4168)"
         help
             audio_capture 读出 PCM 后、扇出前对 int16 放大并饱和。
             与 ES7210 硬件增益叠加。
+
+    config ENV_SOUND_ENABLE
+        bool "启用环境声级估算"
+        default y
+        help
+            订阅 ES7210 PCM，用 RMS 估算环境声音（dB），上报到 /api/data 的 sound 字段。
+
+    config ENV_SOUND_REF_DB
+        int "全幅对应参考声压 (dB SPL)"
+        depends on ENV_SOUND_ENABLE
+        default 94
+        range 60 130
+        help
+            level_db ≈ 20*log10(rms/32768) + REF_DB + 传感器 offset_db。
+            可用已知声源校准，再通过 Web「校准值」微调。
+
+    config ENV_SOUND_EMA_ALPHA_MILLI
+        int "声级平滑系数 (千分比)"
+        depends on ENV_SOUND_ENABLE
+        default 200
+        range 50 900
+        help
+            EMA: level = (1-a)*prev + a*chunk，200 = 0.2。
 
 endmenu
 

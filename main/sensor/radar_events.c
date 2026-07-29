@@ -409,7 +409,6 @@ static char *build_feed_json_locked(const area_config_t *cfg, uint8_t filter_are
         cJSON_AddStringToObject(root, "name", cfg->tags[filter_area_id].name);
         cJSON_AddNumberToObject(root, "strategy", cfg->tags[filter_area_id].strategy);
     } else {
-        cJSON_AddBoolToObject(root, "enabled", cfg != NULL && cfg->enabled);
         append_areas_array(root, cfg);
     }
 
@@ -751,8 +750,7 @@ static void radar_events_watch_task(void *arg)
     const TickType_t interval = pdMS_TO_TICKS(CONFIG_MCP_RADAR_POLL_INTERVAL_MS);
 
     while (s_running) {
-        if (area_config_get(&s_poll_cfg) == ESP_OK &&
-            s_poll_cfg.enabled && s_poll_cfg.tag_count > 0) {
+        if (area_config_get(&s_poll_cfg) == ESP_OK && s_poll_cfg.tag_count > 0) {
             if (radar_area_get_status(s_poll_areas, &s_poll_area_count) == ESP_OK) {
                 process_snapshot(&s_poll_cfg, s_poll_areas);
             }
@@ -918,7 +916,7 @@ esp_err_t radar_events_read_area(uint8_t area_id, char **out_json)
     }
 
     area_config_t cfg = {0};
-    if (area_config_get(&cfg) != ESP_OK || !cfg.enabled || area_id >= cfg.tag_count) {
+    if (area_config_get(&cfg) != ESP_OK || area_id >= cfg.tag_count) {
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -933,3 +931,4 @@ esp_err_t radar_events_read_area(uint8_t area_id, char **out_json)
     *out_json = payload;
     return ESP_OK;
 }
+ 

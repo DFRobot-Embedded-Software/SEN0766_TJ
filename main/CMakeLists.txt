@@ -4,11 +4,13 @@ set(srcs
     "wifi/captive_portal.c"
     "web/web_server.c"
     "web/web_fs.c"
+    "web/web_log.c"
     "sensor/env_sensors.c"
     "sensor/radar_area.c"
     "sensor/radar_events.c"
-    "sensor/board_snapshot.c"
-    "sensor/stcc4_sensor.c"
+        "sensor/board_snapshot.c"
+        "sensor/sensor_settings.c"
+        "sensor/stcc4_sensor.c"
     "sensor/ltr303_sensor.c"
     "sensor/sc7a20h_sensor.c"
     "sensor/c4004_sensor.c"
@@ -19,19 +21,28 @@ set(srcs
     "ota/ota_update.c"
     "led/ws2812_led.c"
     "led/ws2812_fx.c"
+    "led/rgb_ui.c"
     "audio/amp/ns4168_amp.c"
 )
 
-set(yamnet_requires "")
+set(audio_requires "")
 set(led_requires "")
 
 if(CONFIG_WS2812_ENABLE)
     list(APPEND led_requires espressif__led_strip)
 endif()
 
+if(CONFIG_YAMNET_ENABLE OR CONFIG_ENV_SOUND_ENABLE)
+    list(APPEND srcs "audio/capture/audio_capture.c")
+    list(APPEND audio_requires espressif__esp_codec_dev)
+endif()
+
+if(CONFIG_ENV_SOUND_ENABLE)
+    list(APPEND srcs "audio/sound/env_sound.c")
+endif()
+
 if(CONFIG_YAMNET_ENABLE)
     list(APPEND srcs
-        "audio/capture/audio_capture.c"
         "audio/stream/audio_stream.c"
         "audio/wake/esp_sr_wake.c"
         "audio/yamnet/yamnet_mel.c"
@@ -39,13 +50,12 @@ if(CONFIG_YAMNET_ENABLE)
         "audio/yamnet/yamnet_events.c"
         "audio/yamnet/yamnet_classifier.cc"
     )
-    list(APPEND yamnet_requires
+    list(APPEND audio_requires
         espressif__esp-tflite-micro
         espressif__esp-dsp
-        espressif__esp_codec_dev
     )
     if(CONFIG_ESP_SR_WAKE_ENABLE)
-        list(APPEND yamnet_requires espressif__esp-sr)
+        list(APPEND audio_requires espressif__esp-sr)
     endif()
 endif()
 
@@ -66,6 +76,7 @@ idf_component_register(
         "audio/stream"
         "audio/wake"
         "audio/yamnet"
+        "audio/sound"
     REQUIRES
         nvs_flash esp_wifi esp_wifi_remote esp_hosted esp_event esp_netif
         esp_http_server spiffs json mdns driver
@@ -73,5 +84,6 @@ idf_component_register(
         esp_timer
         esp_system
         app_update
-    PRIV_REQUIRES ${yamnet_requires} ${led_requires}
+        esp_partition
+    PRIV_REQUIRES ${audio_requires} ${led_requires}
 )
