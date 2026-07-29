@@ -1,0 +1,108 @@
+/* 环境异常阈值页：卡片式布局 */
+.threshold-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.threshold-card {
+  background: #fff;
+  border: 1px solid #e7ecf3;
+  border-radius: 12px;
+  padding: 16px 16px 14px;
+  min-width: 0;
+}
+.threshold-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.threshold-card-head .sensor-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+.threshold-card-head b {
+  font-size: 15px;
+  color: #172033;
+}
+.threshold-card-head .badge {
+  margin-left: auto;
+  background: #eaf8f0;
+  color: #12a35a;
+  border: 0;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.threshold-card > p {
+  margin: 0 0 12px;
+  color: #8a94a5;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.threshold-fields {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+.threshold-fields.two {
+  grid-template-columns: 1fr 1fr;
+}
+.threshold-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #475467;
+  font-size: 12px;
+  font-weight: 600;
+  min-width: 0;
+}
+.threshold-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #d9e2f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 0 10px;
+  height: 38px;
+}
+.threshold-input input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  outline: 0;
+  color: #172033;
+  font-size: 14px;
+  font-weight: 600;
+}
+.threshold-input em {
+  color: #8a94a5;
+  font-style: normal;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.sensor-icon.blue { background: #e8f0ff; color: #1265ee; }
+.sensor-icon.green { background: #e7f8f0; color: #10b981; }
+.sensor-icon.purple { background: #f1ebff; color: #8b5cf6; }
+.sensor-icon.orange { background: #fff4e8; color: #f59e0b; }
+.sensor-icon.cyan { background: #e7f7fb; color: #0ea5b7; }
+
+@media (max-width: 1100px) {
+  .threshold-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  .threshold-grid { grid-template-columns: 1fr; }
+  .threshold-fields.two { grid-template-columns: 1fr; }
+}

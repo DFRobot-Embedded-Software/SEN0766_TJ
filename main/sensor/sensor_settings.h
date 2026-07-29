@@ -1,6 +1,6 @@
 /**
  * @file sensor_settings.h
- * @brief 前端 /api/sensors 参数持久化（NVS JSON）
+ * @brief 环境异常判定阈值持久化（NVS JSON）；供 /api/sensors 与固件读取
  */
 #pragma once
 

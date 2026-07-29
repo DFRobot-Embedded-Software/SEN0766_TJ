@@ -839,17 +839,10 @@ static esp_err_t api_sensors_post_handler(httpd_req_t *req)
         return send_json_error(req, "400 Bad Request", "invalid sensors payload");
     }
 
-    /* 安装高度等毫米波参数变更后，立即下发到 C4004 */
-    if (c4004_sensor_is_ready()) {
-        esp_err_t sync_err = c4004_sensor_sync_install();
-        if (sync_err != ESP_OK) {
-            ESP_LOGW(TAG, "C4004 install sync after sensors save: %s", esp_err_to_name(sync_err));
-        }
-    }
-
+    /* 阈值页不再改安装高度，无需每次保存都同步 C4004 */
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddBoolToObject(resp, "ok", true);
-    cJSON_AddStringToObject(resp, "message", "传感器设置已保存");
+    cJSON_AddStringToObject(resp, "message", "阈值已保存");
     esp_err_t err = send_json(req, resp);
     cJSON_Delete(resp);
     return err;

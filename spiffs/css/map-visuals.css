@@ -111,7 +111,7 @@
   position: relative;
   width: 100% !important;
   max-width: 100%;
-  height: 300px !important;
+  height: 380px !important;
   aspect-ratio: auto !important;
   margin: 0;
   overflow: hidden !important;
@@ -124,7 +124,7 @@
   background-size: 38px 38px;
 }
 .map.calibration.radar-frame {
-  height: 360px !important;
+  height: 440px !important;
 }
 .live-boundary.full-fov {
   inset: 16px !important;
@@ -138,9 +138,9 @@
 @media (max-width: 760px) {
   .map.radar-frame,
   .region-preview.radar-frame {
-    height: 260px !important;
+    height: 320px !important;
   }
   .map.calibration.radar-frame {
-    height: 300px !important;
+    height: 360px !important;
   }
 }
