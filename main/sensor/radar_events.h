@@ -1,10 +1,9 @@
 /**
  * @file radar_events.h
- * @brief C4004 区域事件检测（纯领域逻辑，不依赖 MCP 传输）
+ * @brief C4004 毫米波事件检测器（写入统一 device_event_bus）
  *
- * 事件写入环形缓冲区，read 时附带当前 area_config 中的区域列表。
- * 用户通过 Web 增删区域后无需改代码，调用方（如 mcp_provider_radar）
- * 负责把这里的通知转换成协议层的资源更新。
+ * 检测逻辑与传输解耦；MCP/Web 从总线读同一份日志。
+ * notify_cb 可选（兼容旧路径）；推荐挂 device_event_subscribe。
  */
 #pragma once
 

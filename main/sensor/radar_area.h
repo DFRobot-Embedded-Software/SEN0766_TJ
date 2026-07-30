@@ -74,6 +74,9 @@ bool area_coords_valid(const area_tag_t *tag);
 /** @brief 由 4 角点计算中心与宽高，并输出调试日志 */
 esp_err_t area_coords_to_rect(const area_tag_t *tag, area_rect_t *out);
 
+/** @brief 点是否落在任一干扰源标签（strategy=4 / C4004 Noise）内，单位 cm */
+bool area_point_in_noise_zone(float x_cm, float y_cm);
+
 esp_err_t area_config_get(area_config_t *out);
 /** @brief 添加标签；成功时 *out_id 为新下标（可传 NULL） */
 esp_err_t area_config_add_tag(const area_tag_t *tag, uint8_t *out_id);

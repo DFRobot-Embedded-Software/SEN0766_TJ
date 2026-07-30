@@ -4,6 +4,8 @@
  *
  * 自行订阅 audio_capture；仅在 audio_stream_start() 之后向网络发送。
  * 正式触发点留给 esp-sr 唤醒回调。
+ *
+ * 后续将由 WebSocket 替换，见 README_WS.md（本阶段未实现）。
  */
 #pragma once
 

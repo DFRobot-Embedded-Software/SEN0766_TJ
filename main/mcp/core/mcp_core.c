@@ -180,7 +180,10 @@ esp_err_t mcp_core_start(void)
         "Subscribe to sensor://temperature for environment push updates. "
         "Subscribe to sensor://events for radar events; areas[] follows Web config. "
         "Per-area: sensor://area/{id}/events. "
-        "Event types: room_empty, area_enter, area_exit, area_dwell. "
+        "Event types: range_enter, range_exit, room_empty, area_enter, area_exit, "
+        "person_static, person_moving; "
+        "env: temp_high, humidity_high/low, co2_high, lux_dark/bright; "
+        "sound: sound_cry, sound_glass, sound_alarm, sound_db_high. "
         "Read after notifications/resources/updated."));
 
     httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();

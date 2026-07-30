@@ -4,6 +4,8 @@
  */
 #include "mcp_provider_radar.h"
 
+#include "device_event_bus.h"
+#include "device_event_types.h"
 #include "mcp_core.h"
 #include "mcp_json_util.h"
 #include "radar_area.h"
@@ -123,7 +125,7 @@ static esp_err_t radar_events_feed_read_cb(const char *uri,
     (void)out_blob_base64;
 
     char *payload = NULL;
-    if (radar_events_read_feed(&payload) != ESP_OK || payload == NULL) {
+    if (device_event_read_feed(&payload) != ESP_OK || payload == NULL) {
         return ESP_ERR_NO_MEM;
     }
     *out_mime_type = strdup("application/json");
@@ -146,7 +148,7 @@ static esp_err_t radar_area_events_read_cb(const char *uri,
 
     uint8_t area_id = (uint8_t)(uintptr_t)user_ctx;
     char *payload = NULL;
-    esp_err_t err = radar_events_read_area(area_id, &payload);
+    esp_err_t err = device_event_read_area(area_id, &payload);
 
     cJSON *json = NULL;
     if (err == ESP_ERR_NOT_FOUND) {
@@ -289,21 +291,27 @@ static void request_area_sync(void)
 static void on_area_config_changed(void)
 {
     radar_events_reset_state();
-    radar_events_clear_log();
+    device_event_clear();
     request_area_sync();
 }
 
-static void on_radar_event(uint8_t area_id)
+static void on_device_event(const char *type, uint8_t area_id, void *ctx)
 {
-    if (area_id == RADAR_EVENT_AREA_ID_GLOBAL) {
-        mcp_core_notify_resource(MCP_RESOURCE_EVENTS_URI);
-        return;
-    }
-    if (area_id < s_area_resource_count && s_area_resources[area_id].resource != NULL) {
-        mcp_core_notify_resource(s_area_resources[area_id].uri);
-        return;
-    }
+    (void)type;
+    (void)ctx;
+
     mcp_core_notify_resource(MCP_RESOURCE_EVENTS_URI);
+    if (area_id != DEVICE_EVENT_AREA_ID_GLOBAL) {
+        if (area_id < s_area_resource_count && s_area_resources[area_id].resource != NULL) {
+            mcp_core_notify_resource(s_area_resources[area_id].uri);
+        }
+        return;
+    }
+    for (uint8_t i = 0; i < s_area_resource_count; i++) {
+        if (s_area_resources[i].resource != NULL) {
+            mcp_core_notify_resource(s_area_resources[i].uri);
+        }
+    }
 }
 
 static esp_err_t radar_register_tools(esp_mcp_t *mcp)
@@ -330,6 +338,8 @@ static esp_err_t radar_register_resources(esp_mcp_t *mcp)
         "radar-events",
         "Radar event stream",
         "All C4004 radar events with current area list. "
+        "Types: range_enter/exit, room_empty, area_enter/exit, person_static/moving; "
+        "env (temp/humidity/co2/lux); sound (cry/glass/alarm/db). "
         "Also subscribe to sensor://area/{id}/events for a single area.",
         "application/json",
         radar_events_feed_read_cb,
@@ -357,7 +367,10 @@ static esp_err_t radar_start_runtime(void)
     area_config_set_change_callback(on_area_config_changed);
     request_area_sync();
 
-    esp_err_t err = radar_events_start(on_radar_event);
+    (void)device_event_bus_init();
+    (void)device_event_subscribe(on_device_event, NULL);
+
+    esp_err_t err = radar_events_start(NULL);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "radar event watch failed: %s", esp_err_to_name(err));
     }

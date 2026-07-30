@@ -137,6 +137,42 @@ esp_err_t area_coords_to_rect(const area_tag_t *tag, area_rect_t *out)
     return ESP_OK;
 }
 
+bool area_point_in_noise_zone(float x_cm, float y_cm)
+{
+    for (uint8_t i = 0; i < s_area_config.tag_count; i++) {
+        const area_tag_t *tag = &s_area_config.tags[i];
+        if (tag->strategy != 4) {
+            continue;
+        }
+        float min_x = tag->coords[0][0];
+        float max_x = tag->coords[0][0];
+        float min_y = tag->coords[0][1];
+        float max_y = tag->coords[0][1];
+        for (int p = 1; p < 4; p++) {
+            if (tag->coords[p][0] < min_x) {
+                min_x = tag->coords[p][0];
+            }
+            if (tag->coords[p][0] > max_x) {
+                max_x = tag->coords[p][0];
+            }
+            if (tag->coords[p][1] < min_y) {
+                min_y = tag->coords[p][1];
+            }
+            if (tag->coords[p][1] > max_y) {
+                max_y = tag->coords[p][1];
+            }
+        }
+        if ((max_x - min_x) < AREA_RECT_MIN_SIZE_CM ||
+            (max_y - min_y) < AREA_RECT_MIN_SIZE_CM) {
+            continue;
+        }
+        if (x_cm >= min_x && x_cm <= max_x && y_cm >= min_y && y_cm <= max_y) {
+            return true;
+        }
+    }
+    return false;
+}
+
 esp_err_t radar_area_fetch_coord(float *x, float *y, uint8_t *target_count, int8_t *picked_index)
 {
     if (x == NULL || y == NULL) {
@@ -344,6 +380,16 @@ esp_err_t radar_area_get_status(area_status_t areas[AREA_TAG_MAX], uint8_t *out_
 
         if (c4004_sensor_get_tag_status(i, st) != ESP_OK) {
             st->strategy = tag->strategy;
+        }
+        /* 配置侧策略为准；干扰源/空标签强制不计入人数 */
+        st->strategy = tag->strategy;
+        if (tag->strategy == 4 || tag->strategy == 5) {
+            st->active = 0;
+            st->static_count = 0;
+            st->enter = false;
+            st->exit = false;
+            st->approaching = false;
+            st->leaving = false;
         }
 
         if (tag->strategy == 1 && c4004_sensor_is_ready()) {

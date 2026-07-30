@@ -78,6 +78,12 @@ static cJSON *snapshot_to_json(const sensor_snapshot_t *snapshot)
             cJSON_AddBoolToObject(area, "approaching", st->approaching);
             cJSON_AddBoolToObject(area, "leaving", st->leaving);
             break;
+        case 4:
+            cJSON_AddStringToObject(area, "role", "noise");
+            break;
+        case 5:
+            cJSON_AddStringToObject(area, "role", "none");
+            break;
         default:
             cJSON_AddNumberToObject(area, "active", st->active);
             cJSON_AddNumberToObject(area, "static", st->static_count);

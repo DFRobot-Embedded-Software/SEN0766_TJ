@@ -1,4 +1,6 @@
 #include "board_snapshot.h"
+#include "device_event_bus.h"
+#include "env_event_detector.h"
 #include "env_sensors.h"
 #include "sensor_settings.h"
 
@@ -9,6 +11,8 @@ void board_snapshot_init(void)
     env_sensors_init();
     radar_area_init();
     sensor_settings_init();
+    (void)device_event_bus_init();
+    (void)env_event_detector_start();
 }
 
 esp_err_t board_snapshot_get(sensor_snapshot_t *out)

@@ -13,6 +13,7 @@
 #include "freertos/task.h"
 #include "board_snapshot.h"
 #include "c4004_sensor.h"
+#include "device_event_bus.h"
 #include "ota_update.h"
 #include "radar_area.h"
 #include "sc7a20h_sensor.h"
@@ -238,36 +239,6 @@ static void fill_tag_from_json(const cJSON *root, area_tag_t *tag)
     parse_tag_coords_m(coords, tag);
 }
 
-static const char *point_in_region_name(const area_config_t *cfg, float x_cm, float y_cm)
-{
-    if (cfg == NULL) {
-        return NULL;
-    }
-    for (uint8_t i = 0; i < cfg->tag_count; i++) {
-        const area_tag_t *tag = &cfg->tags[i];
-        float min_x = tag->coords[0][0], max_x = tag->coords[0][0];
-        float min_y = tag->coords[0][1], max_y = tag->coords[0][1];
-        for (int p = 1; p < 4; p++) {
-            if (tag->coords[p][0] < min_x) {
-                min_x = tag->coords[p][0];
-            }
-            if (tag->coords[p][0] > max_x) {
-                max_x = tag->coords[p][0];
-            }
-            if (tag->coords[p][1] < min_y) {
-                min_y = tag->coords[p][1];
-            }
-            if (tag->coords[p][1] > max_y) {
-                max_y = tag->coords[p][1];
-            }
-        }
-        if (x_cm >= min_x && x_cm <= max_x && y_cm >= min_y && y_cm <= max_y) {
-            return tag->name;
-        }
-    }
-    return NULL;
-}
-
 static esp_err_t api_data_handler(httpd_req_t *req)
 {
     sensor_snapshot_t snapshot = {0};
@@ -297,35 +268,63 @@ static esp_err_t api_data_handler(httpd_req_t *req)
     }
 
 #if CONFIG_YAMNET_ENABLE
-    char evt_type[24] = {0};
-    char evt_label[32] = {0};
-    uint32_t evt_age_ms = 0;
-    if (yamnet_events_get_last(evt_type, sizeof(evt_type), evt_label, sizeof(evt_label), &evt_age_ms)) {
-        /* 声音事件保留最近 24 小时 */
-        if (evt_age_ms <= 24u * 3600u * 1000u) {
-            cJSON *sound_event = cJSON_AddObjectToObject(root, "sound_event");
-            cJSON_AddStringToObject(sound_event, "id", evt_type);
-            cJSON_AddStringToObject(sound_event, "type", evt_label[0] ? evt_label : evt_type);
-            if (evt_age_ms < 5000) {
-                cJSON_AddStringToObject(sound_event, "time", "刚刚");
-            } else if (evt_age_ms < 60000) {
-                char buf[24];
-                snprintf(buf, sizeof(buf), "%u 秒前", (unsigned)(evt_age_ms / 1000));
-                cJSON_AddStringToObject(sound_event, "time", buf);
-            } else if (evt_age_ms < 3600000) {
-                char buf[24];
-                snprintf(buf, sizeof(buf), "%u 分钟前", (unsigned)(evt_age_ms / 60000));
-                cJSON_AddStringToObject(sound_event, "time", buf);
-            } else {
-                char buf[24];
-                snprintf(buf, sizeof(buf), "%u 小时前", (unsigned)(evt_age_ms / 3600000));
-                cJSON_AddStringToObject(sound_event, "time", buf);
+    {
+        bool added = false;
+        char *sound_json = NULL;
+        if (device_event_read_latest_by_category(DEVICE_EVENT_CAT_SOUND, &sound_json) == ESP_OK &&
+            sound_json != NULL) {
+            cJSON *src = cJSON_Parse(sound_json);
+            free(sound_json);
+            if (src != NULL) {
+                const cJSON *type = cJSON_GetObjectItem(src, "type");
+                const cJSON *msg = cJSON_GetObjectItem(src, "message");
+                const cJSON *ts = cJSON_GetObjectItem(src, "timestamp");
+                const cJSON *pl = cJSON_GetObjectItem(src, "payload");
+                const cJSON *id = cJSON_IsObject(pl) ? cJSON_GetObjectItem(pl, "id") : NULL;
+                cJSON *sound_event = cJSON_AddObjectToObject(root, "sound_event");
+                if (sound_event != NULL) {
+                    cJSON_AddStringToObject(sound_event, "id",
+                                           cJSON_IsString(id) ? id->valuestring :
+                                           (cJSON_IsString(type) ? type->valuestring : ""));
+                    cJSON_AddStringToObject(sound_event, "type",
+                                           cJSON_IsString(msg) ? msg->valuestring :
+                                           (cJSON_IsString(type) ? type->valuestring : ""));
+                    cJSON_AddStringToObject(sound_event, "time",
+                                           cJSON_IsString(ts) ? ts->valuestring : "—");
+                    added = true;
+                }
+                cJSON_Delete(src);
             }
-        } else {
-            cJSON_AddNullToObject(root, "sound_event");
         }
-    } else {
-        cJSON_AddNullToObject(root, "sound_event");
+        if (!added) {
+            char evt_type[24] = {0};
+            char evt_label[32] = {0};
+            uint32_t evt_age_ms = 0;
+            if (yamnet_events_get_last(evt_type, sizeof(evt_type), evt_label, sizeof(evt_label),
+                                       &evt_age_ms) &&
+                evt_age_ms <= 24u * 3600u * 1000u) {
+                cJSON *sound_event = cJSON_AddObjectToObject(root, "sound_event");
+                cJSON_AddStringToObject(sound_event, "id", evt_type);
+                cJSON_AddStringToObject(sound_event, "type", evt_label[0] ? evt_label : evt_type);
+                if (evt_age_ms < 5000) {
+                    cJSON_AddStringToObject(sound_event, "time", "刚刚");
+                } else if (evt_age_ms < 60000) {
+                    char buf[24];
+                    snprintf(buf, sizeof(buf), "%u 秒前", (unsigned)(evt_age_ms / 1000));
+                    cJSON_AddStringToObject(sound_event, "time", buf);
+                } else if (evt_age_ms < 3600000) {
+                    char buf[24];
+                    snprintf(buf, sizeof(buf), "%u 分钟前", (unsigned)(evt_age_ms / 60000));
+                    cJSON_AddStringToObject(sound_event, "time", buf);
+                } else {
+                    char buf[24];
+                    snprintf(buf, sizeof(buf), "%u 小时前", (unsigned)(evt_age_ms / 3600000));
+                    cJSON_AddStringToObject(sound_event, "time", buf);
+                }
+            } else {
+                cJSON_AddNullToObject(root, "sound_event");
+            }
+        }
     }
 #else
     cJSON_AddNullToObject(root, "sound_event");
@@ -351,7 +350,6 @@ static esp_err_t api_data_handler(httpd_req_t *req)
     cJSON *areas = cJSON_AddArrayToObject(root, "areas");
     int active_sum = 0;
     int static_sum = 0;
-    cJSON *last_event = NULL;
     for (uint8_t i = 0; i < snapshot.area_count; i++) {
         const area_status_t *st = &snapshot.areas[i];
         cJSON *area = cJSON_CreateObject();
@@ -362,24 +360,18 @@ static esp_err_t api_data_handler(httpd_req_t *req)
         case 2:
             cJSON_AddBoolToObject(area, "enter", st->enter);
             cJSON_AddBoolToObject(area, "exit", st->exit);
-            if (st->enter || st->exit) {
-                cJSON_Delete(last_event);
-                last_event = cJSON_CreateObject();
-                cJSON_AddStringToObject(last_event, "name", st->name);
-                cJSON_AddStringToObject(last_event, "event", st->enter ? "进入" : "离开");
-                cJSON_AddStringToObject(last_event, "time", "刚刚");
-            }
             break;
         case 3:
             cJSON_AddBoolToObject(area, "approaching", st->approaching);
             cJSON_AddBoolToObject(area, "leaving", st->leaving);
-            if (st->approaching || st->leaving) {
-                cJSON_Delete(last_event);
-                last_event = cJSON_CreateObject();
-                cJSON_AddStringToObject(last_event, "name", st->name);
-                cJSON_AddStringToObject(last_event, "event", st->approaching ? "靠近" : "远离");
-                cJSON_AddStringToObject(last_event, "time", "刚刚");
-            }
+            break;
+        case 4:
+            /* C4004 Noise：干扰抑制区，不计入人数 */
+            cJSON_AddStringToObject(area, "role", "noise");
+            break;
+        case 5:
+            /* C4004 None：空标签占位 */
+            cJSON_AddStringToObject(area, "role", "none");
             break;
         default:
             cJSON_AddNumberToObject(area, "active", st->active);
@@ -426,13 +418,15 @@ static esp_err_t api_data_handler(httpd_req_t *req)
         c4004_target_info_t infos[8];
         uint8_t n = 0;
         if (c4004_sensor_get_targets(infos, 8, &n) == ESP_OK) {
-            area_config_t cfg = {0};
-            area_config_get(&cfg);
             for (uint8_t i = 0; i < n; i++) {
-                if (infos[i].moving) {
-                    traj_active++;
-                } else {
-                    traj_static++;
+                const bool in_noise = area_point_in_noise_zone((float)infos[i].x_cm,
+                                                              (float)infos[i].y_cm);
+                if (!in_noise) {
+                    if (infos[i].moving) {
+                        traj_active++;
+                    } else {
+                        traj_static++;
+                    }
                 }
                 cJSON *t = cJSON_CreateObject();
                 cJSON_AddNumberToObject(t, "id", infos[i].index);
@@ -442,9 +436,7 @@ static esp_err_t api_data_handler(httpd_req_t *req)
                 cJSON_AddNumberToObject(t, "kinesia", infos[i].kinesia);
                 cJSON_AddBoolToObject(t, "moving", infos[i].moving);
                 cJSON_AddBoolToObject(t, "picked", (int)i == (int)picked);
-                const char *region = point_in_region_name(&cfg, (float)infos[i].x_cm, (float)infos[i].y_cm);
-                cJSON_AddStringToObject(t, "region_name", region ? region : "未进入区域");
-                cJSON_AddNumberToObject(t, "stay_seconds", 0);
+                cJSON_AddBoolToObject(t, "noise_suppressed", in_noise);
                 cJSON_AddItemToArray(targets, t);
             }
         }
@@ -459,14 +451,80 @@ static esp_err_t api_data_handler(httpd_req_t *req)
         cJSON_AddNumberToObject(mmwave, "static_count", static_sum);
     }
     cJSON_AddNumberToObject(mmwave, "target_count", traj_active + traj_static);
-    if (last_event != NULL) {
-        cJSON_AddItemToObject(mmwave, "last_event", last_event);
-    } else {
-        cJSON_AddNullToObject(mmwave, "last_event");
+    {
+        char *le_json = NULL;
+        if (device_event_read_latest_mmwave(&le_json) == ESP_OK && le_json != NULL) {
+            cJSON *le = cJSON_Parse(le_json);
+            free(le_json);
+            if (le != NULL) {
+                cJSON_AddItemToObject(mmwave, "last_event", le);
+            } else {
+                cJSON_AddNullToObject(mmwave, "last_event");
+            }
+        } else {
+            cJSON_AddNullToObject(mmwave, "last_event");
+        }
     }
 
     esp_err_t err = send_json(req, root);
     cJSON_Delete(root);
+    return err;
+}
+
+static esp_err_t api_events_handler(httpd_req_t *req)
+{
+    char query[96] = {0};
+    char area_buf[16] = {0};
+    char cat_buf[16] = {0};
+    bool filter_area = false;
+    uint8_t area_id = 0;
+    const char *category = NULL;
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        if (httpd_query_key_value(query, "area", area_buf, sizeof(area_buf)) == ESP_OK) {
+            int v = atoi(area_buf);
+            if (v >= 0 && v < AREA_TAG_MAX) {
+                area_id = (uint8_t)v;
+                filter_area = true;
+            }
+        }
+        if (httpd_query_key_value(query, "category", cat_buf, sizeof(cat_buf)) == ESP_OK) {
+            if (strcmp(cat_buf, "mmwave") == 0 || strcmp(cat_buf, "env") == 0 ||
+                strcmp(cat_buf, "sound") == 0 || strcmp(cat_buf, "heartbeat") == 0) {
+                category = cat_buf;
+            }
+        }
+    }
+
+    (void)device_event_bus_init();
+
+    char *payload = NULL;
+    esp_err_t err;
+    if (filter_area) {
+        err = device_event_read_area(area_id, &payload);
+        if (err == ESP_ERR_NOT_FOUND) {
+            cJSON *root = cJSON_CreateObject();
+            if (root == NULL) {
+                return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
+            }
+            cJSON_AddBoolToObject(root, "ready", false);
+            cJSON_AddNumberToObject(root, "area_id", area_id);
+            err = send_json(req, root);
+            cJSON_Delete(root);
+            return err;
+        }
+    } else {
+        err = device_event_read_feed_filtered(category, &payload);
+    }
+
+    if (err != ESP_OK || payload == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "events read failed");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    err = httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
+    free(payload);
     return err;
 }
 
@@ -1066,6 +1124,7 @@ static esp_err_t captive_redirect_handler(httpd_req_t *req, httpd_err_code_t err
 static void register_api_handlers(void)
 {
     httpd_uri_t data = {.uri = "/api/data", .method = HTTP_GET, .handler = api_data_handler};
+    httpd_uri_t events = {.uri = "/api/events", .method = HTTP_GET, .handler = api_events_handler};
     httpd_uri_t cfg_get = {.uri = "/api/config", .method = HTTP_GET, .handler = api_config_get_handler};
     httpd_uri_t cfg_post = {.uri = "/api/config", .method = HTTP_POST, .handler = api_config_post_handler};
     httpd_uri_t coord = {.uri = "/api/coord", .method = HTTP_GET, .handler = api_coord_handler};
@@ -1080,6 +1139,7 @@ static void register_api_handlers(void)
     httpd_uri_t logs_post = {.uri = "/api/logs", .method = HTTP_POST, .handler = api_logs_post_handler};
 
     httpd_register_uri_handler(s_server, &data);
+    httpd_register_uri_handler(s_server, &events);
     httpd_register_uri_handler(s_server, &cfg_get);
     httpd_register_uri_handler(s_server, &cfg_post);
     httpd_register_uri_handler(s_server, &coord);

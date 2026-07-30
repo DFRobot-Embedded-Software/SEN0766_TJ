@@ -15,6 +15,9 @@
 #include "yamnet_pcm_in.h"
 #include "yamnet_mel.h"
 #include "yamnet_events.h"
+#include "device_event_bus.h"
+#include "device_event_types.h"
+#include "cJSON.h"
 
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
@@ -268,7 +271,45 @@ static float class_score(int class_id)
 static void on_event_alert(const yamnet_event_desc_t *ev, float score, int votes, void *user_ctx)
 {
     (void)user_ctx;
-    if (s_event_cb && ev != NULL) {
+    if (ev == NULL) {
+        return;
+    }
+
+    const char *type = DEVICE_EVENT_SOUND_CRY;
+    const char *message = ev->log_name;
+    if (strcmp(ev->id, "cry") == 0) {
+        type = DEVICE_EVENT_SOUND_CRY;
+        message = "婴儿哭泣";
+    } else if (strcmp(ev->id, "glass") == 0) {
+        type = DEVICE_EVENT_SOUND_GLASS;
+        message = "检测到玻璃碎裂";
+    } else if (strcmp(ev->id, "alarm") == 0) {
+        type = DEVICE_EVENT_SOUND_ALARM;
+        message = "检测到警报声";
+    }
+
+    cJSON *payload = cJSON_CreateObject();
+    if (payload != NULL) {
+        cJSON_AddStringToObject(payload, "id", ev->id);
+        cJSON_AddNumberToObject(payload, "score", score);
+        cJSON_AddNumberToObject(payload, "votes", votes);
+    }
+
+    device_event_t de;
+    memset(&de, 0, sizeof(de));
+    de.type = type;
+    de.category = DEVICE_EVENT_CAT_SOUND;
+    de.area_id = DEVICE_EVENT_AREA_ID_GLOBAL;
+    de.person_id = -1;
+    de.active = -1;
+    de.static_count = -1;
+    de.message = message;
+    de.payload = payload;
+    (void)device_event_bus_init();
+    (void)device_event_emit(&de);
+    cJSON_Delete(payload);
+
+    if (s_event_cb) {
         s_event_cb(ev->id, score, votes, s_event_cb_ctx);
     }
 }

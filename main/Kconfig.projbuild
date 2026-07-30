@@ -514,31 +514,56 @@ menu "3. 音频算法 (YAMNet / 唤醒 / 透传)"
 
 endmenu
 
-menu "4. MCP 雷达事件"
+menu "4. 设备事件"
+
+    config DEVICE_EVENT_LOG_SIZE
+        int "事件环形缓冲条数"
+        default 32
+        range 8 128
 
     config MCP_RADAR_POLL_INTERVAL_MS
-        int "事件检测轮询 (ms)"
+        int "毫米波事件轮询 (ms)"
         default 500
         range 200 5000
 
-    config MCP_RADAR_DWELL_MS
-        int "停留告警时长 (ms)"
-        default 30000
-        range 5000 300000
+    config EVENT_RANGE_CONFIRM_MS
+        int "进入/离开探测范围确认 (ms)"
+        default 2000
+        range 500 30000
 
-    config MCP_RADAR_OCC_DEBOUNCE_MS
-        int "进出防抖 (ms)"
-        default 1500
-        range 500 10000
+    config EVENT_AREA_CONFIRM_MS
+        int "进入/离开区域确认 (ms)"
+        default 2000
+        range 500 30000
+
+    config EVENT_ROOM_EMPTY_MS
+        int "探测范围无人确认 (ms)"
+        default 300000
+        range 5000 1800000
+
+    config EVENT_PERSON_STATIC_MS
+        int "人员静止确认 (ms)"
+        default 60000
+        range 5000 600000
+
+    config EVENT_PERSON_MOVING_CONFIRM_MS
+        int "恢复运动确认 (ms)"
+        default 2000
+        range 500 30000
 
     config MCP_RADAR_CROSSING_COOLDOWN_MS
         int "room_empty 后抑制重复离开 (ms)"
         default 3000
         range 1000 30000
 
-    config MCP_EVENT_LOG_SIZE
-        int "事件环形缓冲条数"
-        default 32
-        range 8 128
+    config EVENT_ENV_POLL_MS
+        int "环境事件轮询 (ms)"
+        default 2000
+        range 500 30000
+
+    config EVENT_ENV_CONFIRM_MS
+        int "环境阈值持续确认 (ms)"
+        default 60000
+        range 5000 600000
 
 endmenu

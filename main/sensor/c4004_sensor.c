@@ -62,9 +62,11 @@ static const char *TAG = "c4004";
 #define C4004_MAX_TARGETS       8
 #define C4004_SIGNAL_HOLD_MS    2500
 
+#define C4004_TAG_TYPE_NONE            0x00
 #define C4004_TAG_TYPE_BOUNDARY        0x01
 #define C4004_TAG_TYPE_APPROACH_AWAY   0x02
 #define C4004_TAG_TYPE_PEOPLE_COUNT    0x03
+#define C4004_TAG_TYPE_NOISE           0x04
 #define C4004_TAG_SCOPE_RECT           0x01
 
 typedef struct {
@@ -125,6 +127,9 @@ static uint8_t s_ghost_mismatch_streak;
 
 /** UART 请求共用缓冲区，避免 sync/query 在 main 任务栈上分配 ~1.2KB */
 static c4004_packet_t s_work_packet;
+#if CONFIG_C4004_AUTO_RECOVER_ENABLE
+static area_config_t s_health_cfg;
+#endif
 static uint8_t s_tx_payload[C4004_MAX_PAYLOAD];
 
 static uint16_t read_u16(const uint8_t *data)
@@ -219,19 +224,19 @@ static bool sync_install_from_accel(void)
     const uint16_t height_cm = sensor_settings_install_height_cm();
     write_u16(height_data, height_cm);
 
-    c4004_packet_t packet;
+    c4004_packet_t *packet = &s_work_packet;
     if (!request_frame(C4004_CTRL_INSTALL_INFO, C4004_CMD_INSTALL_SET_MODE,
-                       &mode, 1, &packet, C4004_DEFAULT_TIMEOUT_MS)) {
+                       &mode, 1, packet, C4004_DEFAULT_TIMEOUT_MS)) {
         ESP_LOGW(TAG, "set install mode failed");
         return false;
     }
     if (!request_frame(C4004_CTRL_INSTALL_INFO, C4004_CMD_INSTALL_SET_ANGLE,
-                       angle_data, sizeof(angle_data), &packet, C4004_DEFAULT_TIMEOUT_MS)) {
+                       angle_data, sizeof(angle_data), packet, C4004_DEFAULT_TIMEOUT_MS)) {
         ESP_LOGW(TAG, "set install angle failed");
         return false;
     }
     if (!request_frame(C4004_CTRL_INSTALL_INFO, C4004_CMD_INSTALL_SET_HEIGHT,
-                       height_data, sizeof(height_data), &packet, C4004_DEFAULT_TIMEOUT_MS)) {
+                       height_data, sizeof(height_data), packet, C4004_DEFAULT_TIMEOUT_MS)) {
         ESP_LOGW(TAG, "set install height failed");
         return false;
     }
@@ -419,9 +424,8 @@ static bool wait_init_finished(void)
 static bool check_heartbeat(void)
 {
     uint8_t query = C4004_QUERY_DATA;
-    c4004_packet_t packet;
     return request_frame(C4004_CTRL_SYSTEM, C4004_CMD_HEARTBEAT_QUERY,
-                           &query, 1, &packet, C4004_DEFAULT_TIMEOUT_MS);
+                           &query, 1, &s_work_packet, C4004_DEFAULT_TIMEOUT_MS);
 }
 
 static uint8_t web_strategy_to_tag_type(uint8_t strategy)
@@ -431,6 +435,11 @@ static uint8_t web_strategy_to_tag_type(uint8_t strategy)
         return C4004_TAG_TYPE_BOUNDARY;
     case 3:
         return C4004_TAG_TYPE_APPROACH_AWAY;
+    case 4:
+        return C4004_TAG_TYPE_NOISE;
+    case 5:
+        return C4004_TAG_TYPE_NONE;
+    case 1:
     default:
         return C4004_TAG_TYPE_PEOPLE_COUNT;
     }
@@ -542,9 +551,8 @@ static int pick_coord_target_index(void)
 static bool enable_trajectory_track(void)
 {
     uint8_t enable = 1;
-    c4004_packet_t packet;
     return request_frame(C4004_CTRL_TRAJECTORY, C4004_CMD_TRAJECTORY_SET_ENABLE,
-                         &enable, 1, &packet, C4004_DEFAULT_TIMEOUT_MS);
+                         &enable, 1, &s_work_packet, C4004_DEFAULT_TIMEOUT_MS);
 }
 
 static bool set_check_to_active_frames(uint8_t frames)
@@ -552,9 +560,8 @@ static bool set_check_to_active_frames(uint8_t frames)
     if (frames < 1 || frames > 7) {
         frames = 7;
     }
-    c4004_packet_t packet;
     if (!request_frame(C4004_CTRL_TRAJECTORY, C4004_CMD_TRAJECTORY_SET_CHECK_TO_ACTIVE,
-                       &frames, 1, &packet, C4004_DEFAULT_TIMEOUT_MS)) {
+                       &frames, 1, &s_work_packet, C4004_DEFAULT_TIMEOUT_MS)) {
         ESP_LOGW(TAG, "set check-to-active frames timeout");
         return false;
     }
@@ -566,21 +573,31 @@ static const char *strategy_name(uint8_t strategy)
 {
     switch (strategy) {
     case 2:
-        return "边缘门";
+        return "边界";
     case 3:
         return "靠近远离";
+    case 4:
+        return "干扰源";
+    case 5:
+        return "空标签";
+    case 1:
     default:
-        return "统计";
+        return "状态";
     }
 }
 
 static const char *tag_type_name(uint8_t tag_type)
 {
     switch (tag_type) {
+    case C4004_TAG_TYPE_NONE:
+        return "none";
     case C4004_TAG_TYPE_BOUNDARY:
         return "boundary";
     case C4004_TAG_TYPE_APPROACH_AWAY:
         return "approach_away";
+    case C4004_TAG_TYPE_NOISE:
+        return "noise";
+    case C4004_TAG_TYPE_PEOPLE_COUNT:
     default:
         return "people_count";
     }
@@ -922,6 +939,11 @@ static uint8_t tag_type_to_strategy(uint8_t tag_type)
         return 2;
     case C4004_TAG_TYPE_APPROACH_AWAY:
         return 3;
+    case C4004_TAG_TYPE_NOISE:
+        return 4;
+    case C4004_TAG_TYPE_NONE:
+        return 5;
+    case C4004_TAG_TYPE_PEOPLE_COUNT:
     default:
         return 1;
     }
@@ -974,6 +996,24 @@ static void parse_tag_event(const uint8_t *data, uint16_t len)
         st->leaving = false;
         ESP_LOGI(TAG, "people_count tag[%u] motion=%d static=%d (raw=0x%02X)",
                  tag_index, st->active, st->static_count, value);
+    } else if (tag_type == C4004_TAG_TYPE_NOISE) {
+        /* 干扰源区：抑制噪点，不上报人数/进出 */
+        st->active = 0;
+        st->static_count = 0;
+        st->enter = false;
+        st->exit = false;
+        st->approaching = false;
+        st->leaving = false;
+        ESP_LOGI(TAG, "noise tag[%u] value=0x%02X", tag_index, value);
+    } else if (tag_type == C4004_TAG_TYPE_NONE) {
+        /* 空标签：仅占位，无事件 */
+        st->active = 0;
+        st->static_count = 0;
+        st->enter = false;
+        st->exit = false;
+        st->approaching = false;
+        st->leaving = false;
+        ESP_LOGI(TAG, "none tag[%u] value=0x%02X", tag_index, value);
     } else {
         ESP_LOGW(TAG, "unknown tag type %s(%u) idx=%u value=0x%02X",
                  tag_type_name(tag_type), tag_type, tag_index, value);
@@ -1104,8 +1144,9 @@ static void c4004_health_task(void *arg)
             continue;
         }
 
-        area_config_t cfg = {0};
-        if (area_config_get(&cfg) != ESP_OK || cfg.tag_count == 0) {
+        area_config_t *cfg = &s_health_cfg;
+        memset(cfg, 0, sizeof(*cfg));
+        if (area_config_get(cfg) != ESP_OK || cfg->tag_count == 0) {
             continue;
         }
 
@@ -1116,7 +1157,7 @@ static void c4004_health_task(void *arg)
         global_targets = s_target_count;
         xSemaphoreGive(s_state_lock);
 
-        const int tag_people = sum_strategy1_people(&cfg);
+        const int tag_people = sum_strategy1_people(cfg);
         const TickType_t now = xTaskGetTickCount();
         bool do_recover = false;
         bool full_reset = false;
@@ -1150,7 +1191,7 @@ static void c4004_health_task(void *arg)
 
         if (do_recover) {
             ESP_LOGW(TAG, "auto recover: %s", reason);
-            esp_err_t err = c4004_sensor_recover(&cfg, full_reset);
+            esp_err_t err = c4004_sensor_recover(cfg, full_reset);
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "auto recover failed: %s", esp_err_to_name(err));
             }
@@ -1252,7 +1293,7 @@ esp_err_t c4004_sensor_start(void)
     }
 
 #if CONFIG_C4004_AUTO_RECOVER_ENABLE
-    if (xTaskCreate(c4004_health_task, "c4004_health", 4096, NULL, 2, &s_health_task) != pdPASS) {
+    if (xTaskCreate(c4004_health_task, "c4004_health", 8192, NULL, 2, &s_health_task) != pdPASS) {
         ESP_LOGW(TAG, "C4004 health task create failed (auto-recover disabled)");
         s_health_task = NULL;
     }
@@ -1487,6 +1528,10 @@ esp_err_t c4004_sensor_count_targets_in_rect(const area_rect_t *rect, int *activ
     for (uint8_t i = 0; i < s_target_count; i++) {
         const c4004_target_t *target = &s_targets[i];
         if (!point_in_rect(rect, target->x, target->y)) {
+            continue;
+        }
+        /* 落在干扰源区内的目标不计入人数 */
+        if (area_point_in_noise_zone((float)target->x, (float)target->y)) {
             continue;
         }
         if (target_is_moving(target)) {

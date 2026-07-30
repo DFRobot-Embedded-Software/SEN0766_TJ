@@ -27,6 +27,14 @@ bool sensor_settings_sound_enabled(void);
 /** @brief 声音校准偏置 dB（默认 0） */
 float sensor_settings_sound_offset_db(void);
 
+float sensor_settings_temp_high(void);
+float sensor_settings_humidity_high(void);
+float sensor_settings_humidity_low(void);
+int sensor_settings_co2_warning_ppm(void);
+float sensor_settings_sound_warning_db(void);
+float sensor_settings_lux_dark(void);
+float sensor_settings_lux_bright(void);
+
 /**
  * @brief 毫米波安装高度（cm），供 C4004 下发
  * 优先读 sensors.mmwave.install_height_m；无效时回退 menuconfig 默认值

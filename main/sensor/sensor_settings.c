@@ -314,6 +314,57 @@ float sensor_settings_sound_offset_db(void)
     return 0.0f;
 }
 
+static double json_num(const cJSON *obj, const char *key, double def)
+{
+    if (!cJSON_IsObject(obj)) {
+        return def;
+    }
+    const cJSON *v = cJSON_GetObjectItem(obj, key);
+    return cJSON_IsNumber(v) ? v->valuedouble : def;
+}
+
+float sensor_settings_temp_high(void)
+{
+    sensor_settings_init();
+    return (float)json_num(cJSON_GetObjectItem(s_sensors, "temperature_humidity"), "temp_high", 30.0);
+}
+
+float sensor_settings_humidity_high(void)
+{
+    sensor_settings_init();
+    return (float)json_num(cJSON_GetObjectItem(s_sensors, "temperature_humidity"), "humidity_high", 80.0);
+}
+
+float sensor_settings_humidity_low(void)
+{
+    sensor_settings_init();
+    return (float)json_num(cJSON_GetObjectItem(s_sensors, "temperature_humidity"), "humidity_low", 20.0);
+}
+
+int sensor_settings_co2_warning_ppm(void)
+{
+    sensor_settings_init();
+    return (int)lround(json_num(cJSON_GetObjectItem(s_sensors, "co2"), "warning_ppm", 1000.0));
+}
+
+float sensor_settings_sound_warning_db(void)
+{
+    sensor_settings_init();
+    return (float)json_num(cJSON_GetObjectItem(s_sensors, "sound"), "warning_db", 60.0);
+}
+
+float sensor_settings_lux_dark(void)
+{
+    sensor_settings_init();
+    return (float)json_num(cJSON_GetObjectItem(s_sensors, "light"), "dark_lux", 50.0);
+}
+
+float sensor_settings_lux_bright(void)
+{
+    sensor_settings_init();
+    return (float)json_num(cJSON_GetObjectItem(s_sensors, "light"), "bright_lux", 1000.0);
+}
+
 uint16_t sensor_settings_install_height_cm(void)
 {
     sensor_settings_init();
