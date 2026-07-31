@@ -66,6 +66,9 @@ typedef struct {
     bool moving;
 } c4004_target_info_t;
 
+/** @brief 体动幅度 kinesia(0~100) 中文描述，对齐 DFRobot 档位说明 */
+const char *c4004_kinesia_desc(uint8_t kinesia);
+
 /**
  * @brief 复制最近一次 query/refresh 缓存的全部轨迹目标
  * @note 通常先调用 c4004_sensor_query_target / refresh_targets

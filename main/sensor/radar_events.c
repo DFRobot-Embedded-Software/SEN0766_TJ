@@ -357,23 +357,6 @@ static person_track_t *person_find_or_alloc(uint8_t index)
     return NULL;
 }
 
-static const char *kinesia_desc(uint8_t k)
-{
-    if (k == 0) {
-        return "无人";
-    }
-    if (k == 1) {
-        return "仅呼吸静止";
-    }
-    if (k <= 30) {
-        return "小幅肢体运动";
-    }
-    if (k <= 60) {
-        return "缓慢体动";
-    }
-    return "快速体动";
-}
-
 static void process_person_motion(const area_config_t *cfg,
                                   const c4004_target_info_t *targets,
                                   uint8_t n,
@@ -415,13 +398,13 @@ static void process_person_motion(const area_config_t *cfg,
                 snprintf(msg, sizeof(msg),
                          "人员#%u在%s静止%s",
                          (unsigned)targets[t].index, area_name,
-                         kinesia_desc(targets[t].kinesia));
+                         c4004_kinesia_desc(targets[t].kinesia));
                 if (emit_mmwave(DEVICE_EVENT_PERSON_STATIC, area_id, area_name,
                                 (int)targets[t].index, -1, -1, msg)) {
                     ESP_LOGI(TAG,
                              "person_static person=%u area=%u \"%s\" kinesia=%u(%s) feature=0x%02X speed=%d",
                              (unsigned)targets[t].index, (unsigned)area_id, area_name,
-                             targets[t].kinesia, kinesia_desc(targets[t].kinesia),
+                             targets[t].kinesia, c4004_kinesia_desc(targets[t].kinesia),
                              targets[t].feature, (int)targets[t].speed_cm_s);
                 }
                 pt->static_fired = true;
@@ -436,13 +419,13 @@ static void process_person_motion(const area_config_t *cfg,
                     snprintf(msg, sizeof(msg),
                              "人员#%u在%s有%s",
                              (unsigned)targets[t].index, area_name,
-                             kinesia_desc(targets[t].kinesia));
+                             c4004_kinesia_desc(targets[t].kinesia));
                     if (emit_mmwave(DEVICE_EVENT_PERSON_MOVING, area_id, area_name,
                                     (int)targets[t].index, -1, -1, msg)) {
                         ESP_LOGI(TAG,
                                  "person_moving person=%u area=%u \"%s\" kinesia=%u(%s) feature=0x%02X speed=%d",
                                  (unsigned)targets[t].index, (unsigned)area_id, area_name,
-                                 targets[t].kinesia, kinesia_desc(targets[t].kinesia),
+                                 targets[t].kinesia, c4004_kinesia_desc(targets[t].kinesia),
                                  targets[t].feature, (int)targets[t].speed_cm_s);
                     }
                     pt->static_fired = false;
@@ -1212,7 +1195,7 @@ static void process_snapshot(const area_config_t *cfg, const area_status_t *area
                      "  motion person=%u kinesia=%u(%s) feature=0x%02X speed=%d cm/s moving=%d pos=(%d,%d)cm",
                      (unsigned)s_poll_targets[t].index,
                      s_poll_targets[t].kinesia,
-                     kinesia_desc(s_poll_targets[t].kinesia),
+                     c4004_kinesia_desc(s_poll_targets[t].kinesia),
                      s_poll_targets[t].feature,
                      (int)s_poll_targets[t].speed_cm_s,
                      (int)s_poll_targets[t].moving,

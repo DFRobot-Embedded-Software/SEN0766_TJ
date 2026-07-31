@@ -511,18 +511,18 @@ static bool target_is_moving(const c4004_target_t *t)
     return spd >= 10;
 }
 
-static const char *kinesia_level_name(uint8_t k)
+const char *c4004_kinesia_desc(uint8_t kinesia)
 {
-    if (k == 0) {
+    if (kinesia == 0) {
         return "无人";
     }
-    if (k == 1) {
+    if (kinesia == 1) {
         return "仅呼吸无运动";
     }
-    if (k <= 30) {
+    if (kinesia <= 30) {
         return "小幅肢体运动";
     }
-    if (k <= 60) {
+    if (kinesia <= 60) {
         return "缓慢运动";
     }
     return "快速运动";
@@ -1652,7 +1652,7 @@ esp_err_t c4004_sensor_query_target(float *x, float *y, uint8_t *target_count, i
         for (uint8_t i = 0; i < count; i++) {
             ESP_LOGD(TAG, "  target[%u] idx=%u kinesia=%u(%s) feat=0x%02X pos=(%d,%d) spd=%d cm/s",
                      i, s_targets[i].index, s_targets[i].kinesia,
-                     kinesia_level_name(s_targets[i].kinesia),
+                     c4004_kinesia_desc(s_targets[i].kinesia),
                      s_targets[i].feature,
                      (int)s_targets[i].x, (int)s_targets[i].y, (int)s_targets[i].speed);
         }
