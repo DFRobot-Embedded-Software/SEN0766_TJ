@@ -23,6 +23,8 @@ extern "C" {
 #define DEVICE_EVENT_ROOM_EMPTY    "room_empty"
 #define DEVICE_EVENT_AREA_ENTER    "area_enter"
 #define DEVICE_EVENT_AREA_EXIT     "area_exit"
+#define DEVICE_EVENT_APPROACH      "approach"       /**< 靠近/远离标签：靠近 */
+#define DEVICE_EVENT_AWAY          "away"           /**< 靠近/远离标签：远离 */
 #define DEVICE_EVENT_PERSON_STATIC "person_static"
 #define DEVICE_EVENT_PERSON_MOVING "person_moving"
 

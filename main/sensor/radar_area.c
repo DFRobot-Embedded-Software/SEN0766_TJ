@@ -173,6 +173,40 @@ bool area_point_in_noise_zone(float x_cm, float y_cm)
     return false;
 }
 
+bool area_point_in_detection_range(float x_cm, float y_cm)
+{
+    if (!s_area_config.has_detection_range) {
+        return true;
+    }
+
+    float min_x = s_area_config.detection_range[0][0];
+    float max_x = s_area_config.detection_range[0][0];
+    float min_y = s_area_config.detection_range[0][1];
+    float max_y = s_area_config.detection_range[0][1];
+    for (int p = 1; p < 4; p++) {
+        if (s_area_config.detection_range[p][0] < min_x) {
+            min_x = s_area_config.detection_range[p][0];
+        }
+        if (s_area_config.detection_range[p][0] > max_x) {
+            max_x = s_area_config.detection_range[p][0];
+        }
+        if (s_area_config.detection_range[p][1] < min_y) {
+            min_y = s_area_config.detection_range[p][1];
+        }
+        if (s_area_config.detection_range[p][1] > max_y) {
+            max_y = s_area_config.detection_range[p][1];
+        }
+    }
+    if ((max_x - min_x) < AREA_RECT_MIN_SIZE_CM ||
+        (max_y - min_y) < AREA_RECT_MIN_SIZE_CM) {
+        return true;
+    }
+    /* 边缘留 15cm，避免轨迹抖动被判在范围外 */
+    const float margin = 15.0f;
+    return x_cm >= (min_x - margin) && x_cm <= (max_x + margin) &&
+           y_cm >= (min_y - margin) && y_cm <= (max_y + margin);
+}
+
 esp_err_t radar_area_fetch_coord(float *x, float *y, uint8_t *target_count, int8_t *picked_index)
 {
     if (x == NULL || y == NULL) {

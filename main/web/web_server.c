@@ -11,11 +11,13 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "board_snapshot.h"
 #include "c4004_sensor.h"
 #include "device_event_bus.h"
+#include "device_event_types.h"
+#include "env_sensors.h"
 #include "ota_update.h"
 #include "radar_area.h"
+#include "radar_events.h"
 #include "sc7a20h_sensor.h"
 #include "sensor_settings.h"
 #include "web_fs.h"
@@ -239,27 +241,28 @@ static void fill_tag_from_json(const cJSON *root, area_tag_t *tag)
     parse_tag_coords_m(coords, tag);
 }
 
+/** GET /api/data — 环境传感器（温湿度/CO2/光照/声压），前端约 500ms 轮询 */
 static esp_err_t api_data_handler(httpd_req_t *req)
 {
-    sensor_snapshot_t snapshot = {0};
-    board_snapshot_get(&snapshot);
+    env_snapshot_t env = {0};
+    (void)env_sensors_get(&env);
 
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "env_ready", snapshot.env_ready);
+    cJSON_AddBoolToObject(root, "env_ready", env.env_ready);
 
-    if (snapshot.env_ready) {
-        cJSON_AddNumberToObject(root, "temp", round1(snapshot.temperature));
-        cJSON_AddNumberToObject(root, "humidity", round1(snapshot.humidity));
-        cJSON_AddNumberToObject(root, "co2", snapshot.co2);
+    if (env.env_ready) {
+        cJSON_AddNumberToObject(root, "temp", round1(env.temperature));
+        cJSON_AddNumberToObject(root, "humidity", round1(env.humidity));
+        cJSON_AddNumberToObject(root, "co2", env.co2);
     } else {
         cJSON_AddNullToObject(root, "temp");
         cJSON_AddNullToObject(root, "humidity");
         cJSON_AddNullToObject(root, "co2");
     }
 
-    cJSON_AddBoolToObject(root, "lux_ready", snapshot.lux_ready);
-    if (snapshot.lux_ready) {
-        const int lux_i = (int)lround(snapshot.lux);
+    cJSON_AddBoolToObject(root, "lux_ready", env.lux_ready);
+    if (env.lux_ready) {
+        const int lux_i = (int)lround(env.lux);
         cJSON_AddNumberToObject(root, "lux", lux_i);
         cJSON_AddNumberToObject(root, "light", lux_i);
     } else {
@@ -347,49 +350,35 @@ static esp_err_t api_data_handler(httpd_req_t *req)
     cJSON_AddNullToObject(root, "sound");
 #endif
 
-    cJSON *areas = cJSON_AddArrayToObject(root, "areas");
+    esp_err_t err = send_json(req, root);
+    cJSON_Delete(root);
+    return err;
+}
+
+/** GET /api/mmwave — 毫米波目标/人数/事件，前端约 100ms 轮询 */
+static esp_err_t api_mmwave_handler(httpd_req_t *req)
+{
+    area_status_t areas[AREA_TAG_MAX];
+    uint8_t area_count = 0;
     int active_sum = 0;
     int static_sum = 0;
-    for (uint8_t i = 0; i < snapshot.area_count; i++) {
-        const area_status_t *st = &snapshot.areas[i];
-        cJSON *area = cJSON_CreateObject();
-        cJSON_AddStringToObject(area, "name", st->name);
-        cJSON_AddNumberToObject(area, "strategy", st->strategy);
-
-        switch (st->strategy) {
-        case 2:
-            cJSON_AddBoolToObject(area, "enter", st->enter);
-            cJSON_AddBoolToObject(area, "exit", st->exit);
-            break;
-        case 3:
-            cJSON_AddBoolToObject(area, "approaching", st->approaching);
-            cJSON_AddBoolToObject(area, "leaving", st->leaving);
-            break;
-        case 4:
-            /* C4004 Noise：干扰抑制区，不计入人数 */
-            cJSON_AddStringToObject(area, "role", "noise");
-            break;
-        case 5:
-            /* C4004 None：空标签占位 */
-            cJSON_AddStringToObject(area, "role", "none");
-            break;
-        default:
-            cJSON_AddNumberToObject(area, "active", st->active);
-            cJSON_AddNumberToObject(area, "static", st->static_count);
-            active_sum += st->active;
-            static_sum += st->static_count;
-            break;
+    /* refresh_targets（节流 100ms）+ Tag 人数回退 */
+    if (radar_area_get_status(areas, &area_count) == ESP_OK) {
+        for (uint8_t i = 0; i < area_count; i++) {
+            if (areas[i].strategy == 1) {
+                active_sum += areas[i].active;
+                static_sum += areas[i].static_count;
+            }
         }
-        cJSON_AddItemToArray(areas, area);
     }
 
-    cJSON *mmwave = cJSON_AddObjectToObject(root, "mmwave");
+    cJSON *root = cJSON_CreateObject();
     const char *install_status = "unknown";
     sc7a20h_tilt_t tilt = {0};
     if (sc7a20h_sensor_get_tilt(&tilt) == ESP_OK) {
         install_status = tilt.upright ? "normal" : "abnormal";
     }
-    cJSON_AddStringToObject(mmwave, "install_status", install_status);
+    cJSON_AddStringToObject(root, "install_status", install_status);
 
     const char *detect_status = "offline";
     if (c4004_sensor_is_ready()) {
@@ -397,72 +386,94 @@ static esp_err_t api_data_handler(httpd_req_t *req)
     } else {
         detect_status = "idle";
     }
-    cJSON_AddStringToObject(mmwave, "detect_status", detect_status);
+    cJSON_AddStringToObject(root, "detect_status", detect_status);
 
     int16_t fov_xmin = 0, fov_xmax = 0, fov_ymin = 0, fov_ymax = 0;
     c4004_sensor_get_fov_cm(&fov_xmin, &fov_xmax, &fov_ymin, &fov_ymax);
-    cJSON *fov = cJSON_AddObjectToObject(mmwave, "fov");
+    cJSON *fov = cJSON_AddObjectToObject(root, "fov");
     cJSON_AddNumberToObject(fov, "x_min", round1(fov_xmin * WEB_M_PER_CM));
     cJSON_AddNumberToObject(fov, "x_max", round1(fov_xmax * WEB_M_PER_CM));
     cJSON_AddNumberToObject(fov, "y_min", round1(fov_ymin * WEB_M_PER_CM));
     cJSON_AddNumberToObject(fov, "y_max", round1(fov_ymax * WEB_M_PER_CM));
 
-    cJSON *targets = cJSON_AddArrayToObject(mmwave, "targets");
+    cJSON *targets = cJSON_AddArrayToObject(root, "targets");
     int traj_active = 0;
     int traj_static = 0;
-    float tx = 0.0f, ty = 0.0f;
-    uint8_t tcount = 0;
-    int8_t picked = -1;
+    c4004_target_info_t infos[8];
+    uint8_t n = 0;
+    int picked = -1;
     if (c4004_sensor_is_ready() &&
-        c4004_sensor_query_target(&tx, &ty, &tcount, &picked) == ESP_OK && tcount > 0) {
-        c4004_target_info_t infos[8];
-        uint8_t n = 0;
-        if (c4004_sensor_get_targets(infos, 8, &n) == ESP_OK) {
-            for (uint8_t i = 0; i < n; i++) {
-                const bool in_noise = area_point_in_noise_zone((float)infos[i].x_cm,
-                                                              (float)infos[i].y_cm);
-                if (!in_noise) {
-                    if (infos[i].moving) {
-                        traj_active++;
-                    } else {
-                        traj_static++;
-                    }
-                }
-                cJSON *t = cJSON_CreateObject();
-                cJSON_AddNumberToObject(t, "id", infos[i].index);
-                cJSON_AddNumberToObject(t, "x", round1(infos[i].x_cm * WEB_M_PER_CM));
-                cJSON_AddNumberToObject(t, "y", round1(infos[i].y_cm * WEB_M_PER_CM));
-                cJSON_AddNumberToObject(t, "speed", infos[i].speed_cm_s);
-                cJSON_AddNumberToObject(t, "kinesia", infos[i].kinesia);
-                cJSON_AddBoolToObject(t, "moving", infos[i].moving);
-                cJSON_AddBoolToObject(t, "picked", (int)i == (int)picked);
-                cJSON_AddBoolToObject(t, "noise_suppressed", in_noise);
-                cJSON_AddItemToArray(targets, t);
+        c4004_sensor_get_targets(infos, 8, &n) == ESP_OK && n > 0) {
+        for (uint8_t i = 0; i < n; i++) {
+            if (infos[i].moving) {
+                picked = (int)i;
+                break;
             }
+        }
+        if (picked < 0) {
+            picked = 0;
+        }
+        for (uint8_t i = 0; i < n; i++) {
+            const bool in_noise = area_point_in_noise_zone((float)infos[i].x_cm,
+                                                          (float)infos[i].y_cm);
+            if (!in_noise) {
+                if (infos[i].moving) {
+                    traj_active++;
+                } else {
+                    traj_static++;
+                }
+            }
+            cJSON *t = cJSON_CreateObject();
+            cJSON_AddNumberToObject(t, "id", infos[i].index);
+            cJSON_AddNumberToObject(t, "x", round1(infos[i].x_cm * WEB_M_PER_CM));
+            cJSON_AddNumberToObject(t, "y", round1(infos[i].y_cm * WEB_M_PER_CM));
+            cJSON_AddNumberToObject(t, "speed", infos[i].speed_cm_s);
+            cJSON_AddNumberToObject(t, "kinesia", infos[i].kinesia);
+            cJSON_AddBoolToObject(t, "moving", infos[i].moving);
+            cJSON_AddBoolToObject(t, "picked", (int)i == picked);
+            cJSON_AddBoolToObject(t, "noise_suppressed", in_noise);
+            cJSON_AddItemToArray(targets, t);
         }
     }
 
-    /* 实时监测人数优先用轨迹；无目标时回退区域 Tag 汇总 */
     if ((traj_active + traj_static) > 0) {
-        cJSON_AddNumberToObject(mmwave, "active_count", traj_active);
-        cJSON_AddNumberToObject(mmwave, "static_count", traj_static);
+        cJSON_AddNumberToObject(root, "active_count", traj_active);
+        cJSON_AddNumberToObject(root, "static_count", traj_static);
     } else {
-        cJSON_AddNumberToObject(mmwave, "active_count", active_sum);
-        cJSON_AddNumberToObject(mmwave, "static_count", static_sum);
+        cJSON_AddNumberToObject(root, "active_count", active_sum);
+        cJSON_AddNumberToObject(root, "static_count", static_sum);
     }
-    cJSON_AddNumberToObject(mmwave, "target_count", traj_active + traj_static);
-    {
+    cJSON_AddNumberToObject(root, "target_count", traj_active + traj_static);
+
+    cJSON_AddBoolToObject(root, "range_occupied", radar_events_range_occupied());
+
+    cJSON *recent = cJSON_AddArrayToObject(root, "recent_events");
+    if (recent != NULL) {
+        /* 优先用雷达模块 Web 缓存（range_enter/exit），保证页面能看到 */
+        (void)radar_events_fill_web_recent(recent, 16);
+        if (cJSON_GetArraySize(recent) == 0) {
+            (void)device_event_fill_recent(DEVICE_EVENT_CAT_MMWAVE, recent, 16);
+        }
+    }
+    if (recent != NULL && cJSON_GetArraySize(recent) > 0) {
+        cJSON *last = cJSON_GetArrayItem(recent, cJSON_GetArraySize(recent) - 1);
+        if (last != NULL) {
+            cJSON_AddItemToObject(root, "last_event", cJSON_Duplicate(last, true));
+        } else {
+            cJSON_AddNullToObject(root, "last_event");
+        }
+    } else {
         char *le_json = NULL;
         if (device_event_read_latest_mmwave(&le_json) == ESP_OK && le_json != NULL) {
             cJSON *le = cJSON_Parse(le_json);
             free(le_json);
             if (le != NULL) {
-                cJSON_AddItemToObject(mmwave, "last_event", le);
+                cJSON_AddItemToObject(root, "last_event", le);
             } else {
-                cJSON_AddNullToObject(mmwave, "last_event");
+                cJSON_AddNullToObject(root, "last_event");
             }
         } else {
-            cJSON_AddNullToObject(mmwave, "last_event");
+            cJSON_AddNullToObject(root, "last_event");
         }
     }
 
@@ -1124,6 +1135,7 @@ static esp_err_t captive_redirect_handler(httpd_req_t *req, httpd_err_code_t err
 static void register_api_handlers(void)
 {
     httpd_uri_t data = {.uri = "/api/data", .method = HTTP_GET, .handler = api_data_handler};
+    httpd_uri_t mmwave = {.uri = "/api/mmwave", .method = HTTP_GET, .handler = api_mmwave_handler};
     httpd_uri_t events = {.uri = "/api/events", .method = HTTP_GET, .handler = api_events_handler};
     httpd_uri_t cfg_get = {.uri = "/api/config", .method = HTTP_GET, .handler = api_config_get_handler};
     httpd_uri_t cfg_post = {.uri = "/api/config", .method = HTTP_POST, .handler = api_config_post_handler};
@@ -1139,6 +1151,7 @@ static void register_api_handlers(void)
     httpd_uri_t logs_post = {.uri = "/api/logs", .method = HTTP_POST, .handler = api_logs_post_handler};
 
     httpd_register_uri_handler(s_server, &data);
+    httpd_register_uri_handler(s_server, &mmwave);
     httpd_register_uri_handler(s_server, &events);
     httpd_register_uri_handler(s_server, &cfg_get);
     httpd_register_uri_handler(s_server, &cfg_post);

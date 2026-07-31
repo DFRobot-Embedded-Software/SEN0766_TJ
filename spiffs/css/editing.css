@@ -12,7 +12,10 @@
 .page-back:hover { background: #edf4ff; }
 .title .with-back { position: relative; padding-left: 48px; }
 .title .with-back .page-back { position: absolute; left: 0; top: 50%; transform: translateY(-50%); }
-.calibration.editable-map { cursor: crosshair; }
+.calibration.editable-map { cursor: default; }
+.calibration.editable-map .draft-rect.editable { cursor: move; }
+.calibration.editable-map .draft-point { cursor: grab; }
+.calibration.editable-map .draft-point:active { cursor: grabbing; }
 .point-coords { display: flex; align-items: center; gap: 5px; margin-top: 5px; }
 .point-coords label { display: flex; align-items: center; gap: 3px; color: #778296; font-size: 11px; }
 .point-coords input {

@@ -2,9 +2,14 @@
 #include "device_event_bus.h"
 #include "env_event_detector.h"
 #include "env_sensors.h"
+#include "radar_events.h"
 #include "sensor_settings.h"
 
+#include "esp_log.h"
+
 #include <string.h>
+
+static const char *TAG = "board_snapshot";
 
 void board_snapshot_init(void)
 {
@@ -13,6 +18,13 @@ void board_snapshot_init(void)
     sensor_settings_init();
     (void)device_event_bus_init();
     (void)env_event_detector_start();
+    /* 与 MCP 解耦：Web 仪表盘也需要 range_enter/exit */
+    esp_err_t err = radar_events_start(NULL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "radar_events_start FAILED: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGE(TAG, "radar_events_start OK");
+    }
 }
 
 esp_err_t board_snapshot_get(sensor_snapshot_t *out)

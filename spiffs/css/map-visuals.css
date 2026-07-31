@@ -43,6 +43,8 @@
   border: 5px solid rgba(23,102,238,.22);
   border-radius: 50%;
   margin: 0;
+  transition: left .22s linear, top .22s linear;
+  will-change: left, top;
 }
 .target.live-person.static {
   background-color: #64748b !important;

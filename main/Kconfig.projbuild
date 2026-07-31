@@ -527,9 +527,11 @@ menu "4. 设备事件"
         range 200 5000
 
     config EVENT_RANGE_CONFIRM_MS
-        int "进入/离开探测范围确认 (ms)"
-        default 2000
+        int "进入/离开检测范围确认 (ms)"
+        default 1000
         range 500 30000
+        help
+            软占用（含短暂丢帧容忍）持续该时长后上报 range_enter / range_exit。
 
     config EVENT_AREA_CONFIRM_MS
         int "进入/离开区域确认 (ms)"

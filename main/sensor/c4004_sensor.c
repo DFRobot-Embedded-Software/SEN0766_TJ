@@ -89,6 +89,7 @@ typedef struct {
 
 static bool request_frame(uint8_t control, uint8_t cmd, const uint8_t *data, uint16_t len,
                           c4004_packet_t *response, uint32_t timeout_ms);
+static void handle_packet(const c4004_packet_t *packet);
 
 typedef struct {
     uint8_t index;
@@ -98,12 +99,31 @@ typedef struct {
     int16_t speed;
 } c4004_target_t;
 
+/** 显示用平滑状态：按轨迹 index 保持，抑制毫米波坐标抖动 */
+typedef struct {
+    bool used;
+    bool has_pos;
+    uint8_t index;
+    int16_t x;
+    int16_t y;
+    uint8_t miss; /**< 连续未命中帧数，用于短暂保持 */
+} c4004_track_smooth_t;
+
+/* 静止死区(cm) / 运动死区(cm)；位移小于此值不更新显示坐标 */
+#define TARGET_DEADBAND_STATIC_CM  12
+#define TARGET_DEADBAND_MOVE_CM    6
+/* EMA：out = (prev*A + raw*(8-A))/8，A 越大越稳 */
+#define TARGET_EMA_STATIC_A        6
+#define TARGET_EMA_MOVE_A          4
+#define TARGET_HOLD_MISS_FRAMES    2
+
 static SemaphoreHandle_t s_uart_lock;
 static SemaphoreHandle_t s_state_lock;
 static bool s_ready;
 static c4004_tag_state_t s_tag_states[AREA_TAG_MAX];
 static c4004_target_t s_targets[C4004_MAX_TARGETS];
 static uint8_t s_target_count;
+static c4004_track_smooth_t s_smooth[C4004_MAX_TARGETS];
 static TickType_t s_approach_hold_until[AREA_TAG_MAX];
 static TickType_t s_leave_hold_until[AREA_TAG_MAX];
 static TickType_t s_enter_hold_until[AREA_TAG_MAX];
@@ -372,6 +392,10 @@ static bool read_frame(c4004_packet_t *packet, uint32_t timeout_ms)
     return false;
 }
 
+/**
+ * 发送请求并等待匹配应答。
+ * 不再 uart_flush 丢弃主动上报；收包时把 TAG_REPORT 等异步帧交给 handle_packet。
+ */
 static bool request_frame(uint8_t control, uint8_t cmd, const uint8_t *data, uint16_t len,
                           c4004_packet_t *response, uint32_t timeout_ms)
 {
@@ -381,7 +405,15 @@ static bool request_frame(uint8_t control, uint8_t cmd, const uint8_t *data, uin
         return false;
     }
     xSemaphoreTake(s_uart_lock, portMAX_DELAY);
-    uart_flush_rx();
+
+    /* 先排空已有异步帧（靠近/远离/边界 TAG_REPORT），禁止 flush 丢掉 */
+    {
+        c4004_packet_t pending;
+        while (read_frame(&pending, 5)) {
+            handle_packet(&pending);
+        }
+    }
+
     if (!send_command(control, cmd, data, len)) {
         xSemaphoreGive(s_uart_lock);
         return false;
@@ -394,6 +426,8 @@ static bool request_frame(uint8_t control, uint8_t cmd, const uint8_t *data, uin
                 xSemaphoreGive(s_uart_lock);
                 return true;
             }
+            /* 查询等待期间夹杂的 TAG_REPORT / 轨迹上报 */
+            handle_packet(response);
         }
     }
     xSemaphoreGive(s_uart_lock);
@@ -458,10 +492,94 @@ static bool target_is_moving(const c4004_target_t *t)
     return spd >= 10;
 }
 
+static c4004_track_smooth_t *smooth_find(uint8_t index)
+{
+    for (uint8_t i = 0; i < C4004_MAX_TARGETS; i++) {
+        if (s_smooth[i].used && s_smooth[i].index == index) {
+            return &s_smooth[i];
+        }
+    }
+    return NULL;
+}
+
+static c4004_track_smooth_t *smooth_alloc(uint8_t index)
+{
+    c4004_track_smooth_t *slot = smooth_find(index);
+    if (slot != NULL) {
+        return slot;
+    }
+    for (uint8_t i = 0; i < C4004_MAX_TARGETS; i++) {
+        if (!s_smooth[i].used) {
+            memset(&s_smooth[i], 0, sizeof(s_smooth[i]));
+            s_smooth[i].used = true;
+            s_smooth[i].index = index;
+            return &s_smooth[i];
+        }
+    }
+    return NULL;
+}
+
+static void smooth_apply(c4004_target_t *t)
+{
+    if (t == NULL) {
+        return;
+    }
+    c4004_track_smooth_t *sm = smooth_alloc(t->index);
+    if (sm == NULL) {
+        return;
+    }
+
+    sm->miss = 0;
+    if (!sm->has_pos) {
+        sm->x = t->x;
+        sm->y = t->y;
+        sm->has_pos = true;
+        return;
+    }
+
+    const bool moving = target_is_moving(t);
+    const int dead = moving ? TARGET_DEADBAND_MOVE_CM : TARGET_DEADBAND_STATIC_CM;
+    const int alpha = moving ? TARGET_EMA_MOVE_A : TARGET_EMA_STATIC_A;
+    const int32_t dx = (int32_t)t->x - (int32_t)sm->x;
+    const int32_t dy = (int32_t)t->y - (int32_t)sm->y;
+
+    if ((dx * dx + dy * dy) < (dead * dead)) {
+        t->x = sm->x;
+        t->y = sm->y;
+        return;
+    }
+
+    sm->x = (int16_t)(((int32_t)sm->x * alpha + (int32_t)t->x * (8 - alpha)) / 8);
+    sm->y = (int16_t)(((int32_t)sm->y * alpha + (int32_t)t->y * (8 - alpha)) / 8);
+    t->x = sm->x;
+    t->y = sm->y;
+}
+
 static void parse_targets(const uint8_t *data, uint16_t len)
 {
     if (data == NULL || len < C4004_TARGET_RECORD_LEN) {
-        s_target_count = 0;
+        /* 短暂丢帧：保留上一帧目标，避免网页来回闪烁 */
+        for (uint8_t i = 0; i < C4004_MAX_TARGETS; i++) {
+            if (s_smooth[i].used) {
+                s_smooth[i].miss++;
+                if (s_smooth[i].miss > TARGET_HOLD_MISS_FRAMES) {
+                    s_smooth[i].used = false;
+                }
+            }
+        }
+        if (s_target_count > 0) {
+            uint8_t kept = 0;
+            for (uint8_t i = 0; i < s_target_count; i++) {
+                c4004_track_smooth_t *sm = smooth_find(s_targets[i].index);
+                if (sm != NULL && sm->used && sm->miss <= TARGET_HOLD_MISS_FRAMES) {
+                    s_targets[kept] = s_targets[i];
+                    s_targets[kept].x = sm->x;
+                    s_targets[kept].y = sm->y;
+                    kept++;
+                }
+            }
+            s_target_count = kept;
+        }
         return;
     }
 
@@ -481,37 +599,66 @@ static void parse_targets(const uint8_t *data, uint16_t len)
     }
 
     /* 同一 index 或距离过近的目标合并，避免 1 人显示为 2 人 */
+    c4004_target_t deduped[C4004_MAX_TARGETS];
     uint8_t out = 0;
     for (uint8_t i = 0; i < count; i++) {
         bool merged = false;
         for (uint8_t j = 0; j < out; j++) {
-            if (parsed[i].index == s_targets[j].index) {
-                s_targets[j] = parsed[i];
+            if (parsed[i].index == deduped[j].index) {
+                deduped[j] = parsed[i];
                 merged = true;
                 break;
             }
-            int32_t dx = (int32_t)parsed[i].x - (int32_t)s_targets[j].x;
-            int32_t dy = (int32_t)parsed[i].y - (int32_t)s_targets[j].y;
+            int32_t dx = (int32_t)parsed[i].x - (int32_t)deduped[j].x;
+            int32_t dy = (int32_t)parsed[i].y - (int32_t)deduped[j].y;
             if ((dx * dx + dy * dy) < (35 * 35)) {
-                if (target_is_moving(&parsed[i]) && !target_is_moving(&s_targets[j])) {
-                    s_targets[j] = parsed[i];
+                if (target_is_moving(&parsed[i]) && !target_is_moving(&deduped[j])) {
+                    deduped[j] = parsed[i];
                 }
                 merged = true;
                 break;
             }
         }
         if (!merged && out < C4004_MAX_TARGETS) {
-            s_targets[out++] = parsed[i];
+            deduped[out++] = parsed[i];
+        }
+    }
+
+    bool seen[C4004_MAX_TARGETS] = {false};
+    for (uint8_t i = 0; i < out; i++) {
+        smooth_apply(&deduped[i]);
+        s_targets[i] = deduped[i];
+        for (uint8_t s = 0; s < C4004_MAX_TARGETS; s++) {
+            if (s_smooth[s].used && s_smooth[s].index == deduped[i].index) {
+                seen[s] = true;
+                break;
+            }
         }
     }
     s_target_count = out;
 
-    ESP_LOGD(TAG, "targets updated: raw=%u deduped=%u", count, out);
-    for (uint8_t i = 0; i < out; i++) {
-        ESP_LOGD(TAG, "  target[%u] idx=%u kin=0x%02X x=%d y=%d spd=%d cm",
-                 i, s_targets[i].index, s_targets[i].kinesia,
-                 (int)s_targets[i].x, (int)s_targets[i].y, (int)s_targets[i].speed);
+    /* 本帧未出现的轨迹：短暂保持，超时清除 */
+    for (uint8_t s = 0; s < C4004_MAX_TARGETS; s++) {
+        if (!s_smooth[s].used || seen[s]) {
+            continue;
+        }
+        s_smooth[s].miss++;
+        if (s_smooth[s].miss > TARGET_HOLD_MISS_FRAMES) {
+            s_smooth[s].used = false;
+            continue;
+        }
+        if (s_target_count < C4004_MAX_TARGETS) {
+            c4004_target_t hold = {
+                .index = s_smooth[s].index,
+                .kinesia = 0x01,
+                .x = s_smooth[s].x,
+                .y = s_smooth[s].y,
+                .speed = 0,
+            };
+            s_targets[s_target_count++] = hold;
+        }
     }
+
 }
 
 /** 角点标定：多目标时优先选运动目标，避免始终返回 targets[0] */
@@ -717,8 +864,6 @@ static void clear_orphan_tags(uint8_t new_count, uint8_t prev_count)
         }
     }
 }
-
-static void handle_packet(const c4004_packet_t *packet);
 
 static void append_tag_to_payload(uint16_t *offset, uint8_t index, const area_tag_t *tag,
                                   const area_rect_t *rect)
@@ -1069,6 +1214,7 @@ static void reset_local_state(void)
     memset(s_leave_hold_until, 0, sizeof(s_leave_hold_until));
     memset(s_enter_hold_until, 0, sizeof(s_enter_hold_until));
     memset(s_exit_hold_until, 0, sizeof(s_exit_hold_until));
+    memset(s_smooth, 0, sizeof(s_smooth));
     s_target_count = 0;
     xSemaphoreGive(s_state_lock);
 }
@@ -1098,7 +1244,7 @@ static esp_err_t refresh_targets_internal(bool force)
     }
 
     const TickType_t now = xTaskGetTickCount();
-    if (!force && (now - s_last_target_refresh) < pdMS_TO_TICKS(1000)) {
+    if (!force && (now - s_last_target_refresh) < pdMS_TO_TICKS(100)) {
         return ESP_OK;
     }
     s_last_target_refresh = now;
@@ -1397,8 +1543,9 @@ esp_err_t c4004_sensor_get_tag_status(uint8_t index, area_status_t *out)
     out->static_count = st->static_count;
     out->enter = st->enter || signal_active(s_enter_hold_until[index]);
     out->exit = st->exit || signal_active(s_exit_hold_until[index]);
-    out->approaching = st->approaching || signal_active(s_approach_hold_until[index]);
-    out->leaving = st->leaving || signal_active(s_leave_hold_until[index]);
+    /* 靠近/远离仅用 hold 脉冲，避免 st 粘滞导致无法再次上升沿触发 */
+    out->approaching = signal_active(s_approach_hold_until[index]);
+    out->leaving = signal_active(s_leave_hold_until[index]);
     xSemaphoreGive(s_state_lock);
     return ESP_OK;
 }

@@ -427,6 +427,50 @@ esp_err_t device_event_read_latest_by_category(const char *category, char **out_
     return (*out_json != NULL) ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
+esp_err_t device_event_fill_recent(const char *category, cJSON *out_array, int max_count)
+{
+    if (!s_inited || out_array == NULL || !cJSON_IsArray(out_array)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_count == 0) {
+        xSemaphoreGive(s_lock);
+        return ESP_OK;
+    }
+
+    uint8_t start = (uint8_t)((s_next + CONFIG_DEVICE_EVENT_LOG_SIZE - s_count) %
+                              CONFIG_DEVICE_EVENT_LOG_SIZE);
+    /* 先从新到旧收集下标，再按旧到新追加 */
+    uint8_t matched[CONFIG_DEVICE_EVENT_LOG_SIZE];
+    uint8_t matched_n = 0;
+    for (uint8_t n = s_count; n > 0; n--) {
+        uint8_t idx = (uint8_t)((start + n - 1U) % CONFIG_DEVICE_EVENT_LOG_SIZE);
+        const event_record_t *rec = &s_log[idx];
+        if (!rec->valid) {
+            continue;
+        }
+        if (category != NULL && category[0] != '\0' &&
+            strcmp(rec->category, category) != 0) {
+            continue;
+        }
+        matched[matched_n++] = idx;
+        if (max_count > 0 && matched_n >= (uint8_t)max_count) {
+            break;
+        }
+    }
+
+    for (uint8_t i = matched_n; i > 0; i--) {
+        const event_record_t *rec = &s_log[matched[i - 1U]];
+        cJSON *item = cJSON_Parse(rec->json);
+        if (item != NULL) {
+            cJSON_AddItemToArray(out_array, item);
+        }
+    }
+    xSemaphoreGive(s_lock);
+    return ESP_OK;
+}
+
 esp_err_t device_event_read_latest_mmwave(char **out_json)
 {
     if (!s_inited || out_json == NULL) {

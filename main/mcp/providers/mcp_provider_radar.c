@@ -290,8 +290,8 @@ static void request_area_sync(void)
 
 static void on_area_config_changed(void)
 {
+    /* 只重置边沿状态，保留事件日志，避免 Web「最近事件」被清空 */
     radar_events_reset_state();
-    device_event_clear();
     request_area_sync();
 }
 
@@ -338,7 +338,7 @@ static esp_err_t radar_register_resources(esp_mcp_t *mcp)
         "radar-events",
         "Radar event stream",
         "All C4004 radar events with current area list. "
-        "Types: range_enter/exit, room_empty, area_enter/exit, person_static/moving; "
+        "Types: range_enter/exit, room_empty, area_enter/exit, approach/away, person_static/moving; "
         "env (temp/humidity/co2/lux); sound (cry/glass/alarm/db). "
         "Also subscribe to sensor://area/{id}/events for a single area.",
         "application/json",
@@ -394,7 +394,7 @@ static void radar_stop_runtime(void)
         s_area_sync_queue = NULL;
     }
 
-    radar_events_stop();
+    /* 事件检测由 board_snapshot_init 常驻，断网/停 MCP 时不停表 */
     clear_area_resources();
 }
 

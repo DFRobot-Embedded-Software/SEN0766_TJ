@@ -64,6 +64,12 @@ esp_err_t device_event_read_latest_mmwave(char **out_json);
  */
 esp_err_t device_event_read_latest_by_category(const char *category, char **out_json);
 
+/**
+ * 将最近 max_count 条（时间从旧到新）指定 category 事件追加到 out_array
+ * category 为 NULL 时不过滤；max_count<=0 表示全部
+ */
+esp_err_t device_event_fill_recent(const char *category, struct cJSON *out_array, int max_count);
+
 /** 扫描日志：该区域是否有未配对的 area_enter */
 bool device_event_area_has_unpaired_enter(uint8_t area_id);
 
