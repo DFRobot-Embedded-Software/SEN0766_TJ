@@ -93,7 +93,8 @@ static void handle_packet(const c4004_packet_t *packet);
 
 typedef struct {
     uint8_t index;
-    uint8_t kinesia;
+    uint8_t kinesia;  /**< 体动幅度 0~100（官方算法量化值） */
+    uint8_t feature;  /**< 0=静止 1=运动 2=不确定 (eTargetFeature_t) */
     int16_t x;
     int16_t y;
     int16_t speed;
@@ -479,17 +480,52 @@ static uint8_t web_strategy_to_tag_type(uint8_t strategy)
     }
 }
 
+/** 轨迹目标特征（DFRobot eTargetFeature_t） */
+#define C4004_FEATURE_STATIC     0x00
+#define C4004_FEATURE_MOTION     0x01
+#define C4004_FEATURE_UNCERTAIN  0x02
+
+/** 边界进出（DFRobot eBoundaryDirection_t） */
+#define C4004_BOUNDARY_ENTER     0x00
+#define C4004_BOUNDARY_EXIT      0x01
+#define C4004_BOUNDARY_NONE      0x02
+
+/** 靠近/远离（DFRobot eApproachAwayDirection_t） */
+#define C4004_DIR_APPROACH       0x00
+#define C4004_DIR_AWAY           0x01
+#define C4004_DIR_NONE           0x02
+
 static bool target_is_moving(const c4004_target_t *t)
 {
     if (t == NULL) {
         return false;
     }
-    /* DFRobot：0x01 静止，0x02 运动；也可能为位组合（实测见 0x07） */
-    if (t->kinesia == 0x02 || (t->kinesia & 0x02) != 0) {
+    /* 官方：kinesia 为 0~100 体动幅度，非静止/运动标志；运动看 targetFeature */
+    if (t->feature == C4004_FEATURE_MOTION) {
+        return true;
+    }
+    if (t->kinesia >= 2) {
         return true;
     }
     int16_t spd = t->speed < 0 ? (int16_t)(-t->speed) : t->speed;
     return spd >= 10;
+}
+
+static const char *kinesia_level_name(uint8_t k)
+{
+    if (k == 0) {
+        return "无人";
+    }
+    if (k == 1) {
+        return "仅呼吸无运动";
+    }
+    if (k <= 30) {
+        return "小幅肢体运动";
+    }
+    if (k <= 60) {
+        return "缓慢运动";
+    }
+    return "快速运动";
 }
 
 static c4004_track_smooth_t *smooth_find(uint8_t index)
@@ -593,6 +629,7 @@ static void parse_targets(const uint8_t *data, uint16_t len)
         uint16_t off = (uint16_t)(i * C4004_TARGET_RECORD_LEN);
         parsed[i].index = data[off];
         parsed[i].kinesia = data[off + 1];
+        parsed[i].feature = data[off + 2];
         parsed[i].x = read_sign_i16(&data[off + 3]);
         parsed[i].y = read_sign_i16(&data[off + 5]);
         parsed[i].speed = read_sign_i16(&data[off + 9]);
@@ -650,7 +687,8 @@ static void parse_targets(const uint8_t *data, uint16_t len)
         if (s_target_count < C4004_MAX_TARGETS) {
             c4004_target_t hold = {
                 .index = s_smooth[s].index,
-                .kinesia = 0x01,
+                .kinesia = 1, /* 官方：1=仅呼吸静止 */
+                .feature = C4004_FEATURE_STATIC,
                 .x = s_smooth[s].x,
                 .y = s_smooth[s].y,
                 .speed = 0,
@@ -778,13 +816,15 @@ static void apply_boundary_value(c4004_tag_state_t *st, uint8_t tag_index, uint8
 {
     st->enter = false;
     st->exit = false;
-    /* 与官方 readTagEvent 示例一致：0=进入，非 0=离开 */
-    if (value == 0x00) {
+    /* DFRobot eBoundaryDirection_t：0=进入，1=离开，2=无 */
+    if (value == C4004_BOUNDARY_ENTER) {
         st->enter = true;
         hold_signal(&s_enter_hold_until[tag_index]);
-    } else {
+    } else if (value == C4004_BOUNDARY_EXIT) {
         st->exit = true;
         hold_signal(&s_exit_hold_until[tag_index]);
+    } else if (value != C4004_BOUNDARY_NONE) {
+        ESP_LOGW(TAG, "unknown enterExit=0x%02X", value);
     }
 }
 
@@ -792,33 +832,15 @@ static void apply_motion_dir(c4004_tag_state_t *st, uint8_t tag_index, uint8_t v
 {
     st->approaching = false;
     st->leaving = false;
-    switch (value) {
-    case 0x01:
+    /* DFRobot eApproachAwayDirection_t：0=靠近，1=远离，2=无 */
+    if (value == C4004_DIR_APPROACH) {
         st->approaching = true;
         hold_signal(&s_approach_hold_until[tag_index]);
-        break;
-    case 0x02:
+    } else if (value == C4004_DIR_AWAY) {
         st->leaving = true;
         hold_signal(&s_leave_hold_until[tag_index]);
-        break;
-    case 0x00:
-        /* 部分固件用 0 表示远离/在远区 */
-        st->leaving = true;
-        hold_signal(&s_leave_hold_until[tag_index]);
-        break;
-    default:
-        if (value & 0x01) {
-            st->approaching = true;
-            hold_signal(&s_approach_hold_until[tag_index]);
-        }
-        if (value & 0x02) {
-            st->leaving = true;
-            hold_signal(&s_leave_hold_until[tag_index]);
-        }
-        if (!st->approaching && !st->leaving) {
-            ESP_LOGW(TAG, "unknown motionDir=0x%02X", value);
-        }
-        break;
+    } else if (value != C4004_DIR_NONE) {
+        ESP_LOGW(TAG, "unknown motionDir=0x%02X", value);
     }
 }
 
@@ -1541,9 +1563,9 @@ esp_err_t c4004_sensor_get_tag_status(uint8_t index, area_status_t *out)
     const c4004_tag_state_t *st = &s_tag_states[index];
     out->active = st->active;
     out->static_count = st->static_count;
-    out->enter = st->enter || signal_active(s_enter_hold_until[index]);
-    out->exit = st->exit || signal_active(s_exit_hold_until[index]);
-    /* 靠近/远离仅用 hold 脉冲，避免 st 粘滞导致无法再次上升沿触发 */
+    /* 靠近/远离、进出门仅用 hold 脉冲，避免 st 粘滞导致无法再次上升沿触发 */
+    out->enter = signal_active(s_enter_hold_until[index]);
+    out->exit = signal_active(s_exit_hold_until[index]);
     out->approaching = signal_active(s_approach_hold_until[index]);
     out->leaving = signal_active(s_leave_hold_until[index]);
     xSemaphoreGive(s_state_lock);
@@ -1628,8 +1650,10 @@ esp_err_t c4004_sensor_query_target(float *x, float *y, uint8_t *target_count, i
 
     if (count > 1) {
         for (uint8_t i = 0; i < count; i++) {
-            ESP_LOGD(TAG, "  target[%u] idx=%u kin=0x%02X pos=(%d,%d) spd=%d cm",
+            ESP_LOGD(TAG, "  target[%u] idx=%u kinesia=%u(%s) feat=0x%02X pos=(%d,%d) spd=%d cm/s",
                      i, s_targets[i].index, s_targets[i].kinesia,
+                     kinesia_level_name(s_targets[i].kinesia),
+                     s_targets[i].feature,
                      (int)s_targets[i].x, (int)s_targets[i].y, (int)s_targets[i].speed);
         }
     }
@@ -1717,6 +1741,7 @@ esp_err_t c4004_sensor_get_targets(c4004_target_info_t *out, uint8_t max_count, 
     for (uint8_t i = 0; i < n; i++) {
         out[i].index = s_targets[i].index;
         out[i].kinesia = s_targets[i].kinesia;
+        out[i].feature = s_targets[i].feature;
         out[i].x_cm = s_targets[i].x;
         out[i].y_cm = s_targets[i].y;
         out[i].speed_cm_s = s_targets[i].speed;

@@ -41,10 +41,10 @@ static const char *TAG = "radar_events";
 #define CONFIG_EVENT_ROOM_EMPTY_MS 300000
 #endif
 #ifndef CONFIG_EVENT_PERSON_STATIC_MS
-#define CONFIG_EVENT_PERSON_STATIC_MS 60000
+#define CONFIG_EVENT_PERSON_STATIC_MS 5000
 #endif
 #ifndef CONFIG_EVENT_PERSON_MOVING_CONFIRM_MS
-#define CONFIG_EVENT_PERSON_MOVING_CONFIRM_MS 2000
+#define CONFIG_EVENT_PERSON_MOVING_CONFIRM_MS 1000
 #endif
 #ifndef CONFIG_MCP_RADAR_CROSSING_COOLDOWN_MS
 #define CONFIG_MCP_RADAR_CROSSING_COOLDOWN_MS 3000
@@ -123,7 +123,7 @@ static uint8_t s_web_range_count;
 static SemaphoreHandle_t s_web_range_lock;
 
 #define MCP_RADAR_WATCH_STACK 12288
-#define RADAR_EVT_BUILD_TAG   "RADAR_EVT_20260731i"
+#define RADAR_EVT_BUILD_TAG   "RADAR_EVT_20260731m"
 
 static void web_range_push(const char *type, const char *area, int person_id,
                            int active, int static_count, const char *message)
@@ -203,7 +203,9 @@ static bool emit_mmwave(const char *type,
          strcmp(type, DEVICE_EVENT_APPROACH) == 0 ||
          strcmp(type, DEVICE_EVENT_AWAY) == 0 ||
          strcmp(type, DEVICE_EVENT_AREA_ENTER) == 0 ||
-         strcmp(type, DEVICE_EVENT_AREA_EXIT) == 0)) {
+         strcmp(type, DEVICE_EVENT_AREA_EXIT) == 0 ||
+         strcmp(type, DEVICE_EVENT_PERSON_STATIC) == 0 ||
+         strcmp(type, DEVICE_EVENT_PERSON_MOVING) == 0)) {
         web_range_push(type, area, person_id, active, static_count, message);
     }
 
@@ -226,7 +228,11 @@ static bool emit_mmwave(const char *type,
             (strcmp(type, DEVICE_EVENT_RANGE_ENTER) == 0 ||
              strcmp(type, DEVICE_EVENT_RANGE_EXIT) == 0 ||
              strcmp(type, DEVICE_EVENT_APPROACH) == 0 ||
-             strcmp(type, DEVICE_EVENT_AWAY) == 0)) {
+             strcmp(type, DEVICE_EVENT_AWAY) == 0 ||
+             strcmp(type, DEVICE_EVENT_AREA_ENTER) == 0 ||
+             strcmp(type, DEVICE_EVENT_AREA_EXIT) == 0 ||
+             strcmp(type, DEVICE_EVENT_PERSON_STATIC) == 0 ||
+             strcmp(type, DEVICE_EVENT_PERSON_MOVING) == 0)) {
             return true;
         }
         return false;
@@ -351,24 +357,35 @@ static person_track_t *person_find_or_alloc(uint8_t index)
     return NULL;
 }
 
+static const char *kinesia_desc(uint8_t k)
+{
+    if (k == 0) {
+        return "无人";
+    }
+    if (k == 1) {
+        return "仅呼吸静止";
+    }
+    if (k <= 30) {
+        return "小幅肢体运动";
+    }
+    if (k <= 60) {
+        return "缓慢体动";
+    }
+    return "快速体动";
+}
+
 static void process_person_motion(const area_config_t *cfg,
                                   const c4004_target_info_t *targets,
                                   uint8_t n,
                                   TickType_t now)
 {
-    /* 暂关：先把 range_enter/exit 做稳，避免 person_* 刷屏冲掉 UI 最近事件 */
-    (void)cfg;
-    (void)targets;
-    (void)n;
-    (void)now;
-    return;
-
     const TickType_t static_need = pdMS_TO_TICKS(CONFIG_EVENT_PERSON_STATIC_MS);
     const TickType_t moving_need = pdMS_TO_TICKS(CONFIG_EVENT_PERSON_MOVING_CONFIRM_MS);
     bool seen[PERSON_TRACK_MAX] = {false};
 
     for (uint8_t t = 0; t < n; t++) {
-        if (area_point_in_noise_zone((float)targets[t].x_cm, (float)targets[t].y_cm)) {
+        if (!area_point_in_detection_range((float)targets[t].x_cm, (float)targets[t].y_cm) ||
+            area_point_in_noise_zone((float)targets[t].x_cm, (float)targets[t].y_cm)) {
             continue;
         }
         person_track_t *pt = person_find_or_alloc(targets[t].index);
@@ -386,16 +403,27 @@ static void process_person_motion(const area_config_t *cfg,
         const char *area_name = lookup_person_area(cfg, (float)targets[t].x_cm,
                                                    (float)targets[t].y_cm, &area_id);
         char msg[EVENT_MSG_LEN];
+        /* 官方 kinesia：<=1 视为静止体动，>=2 有肢体/躯干活动 */
+        const bool has_body_motion = (targets[t].kinesia >= 2) || targets[t].moving;
 
-        if (!targets[t].moving) {
+        if (!has_body_motion) {
             pt->moving_confirm_since = 0;
             if (pt->static_since == 0) {
                 pt->static_since = now;
             }
             if (!pt->static_fired && (now - pt->static_since) >= static_need) {
-                snprintf(msg, sizeof(msg), "人员在%s静止", area_name);
-                emit_mmwave(DEVICE_EVENT_PERSON_STATIC, area_id, area_name,
-                            (int)targets[t].index, -1, -1, msg);
+                snprintf(msg, sizeof(msg),
+                         "人员#%u在%s静止%s",
+                         (unsigned)targets[t].index, area_name,
+                         kinesia_desc(targets[t].kinesia));
+                if (emit_mmwave(DEVICE_EVENT_PERSON_STATIC, area_id, area_name,
+                                (int)targets[t].index, -1, -1, msg)) {
+                    ESP_LOGI(TAG,
+                             "person_static person=%u area=%u \"%s\" kinesia=%u(%s) feature=0x%02X speed=%d",
+                             (unsigned)targets[t].index, (unsigned)area_id, area_name,
+                             targets[t].kinesia, kinesia_desc(targets[t].kinesia),
+                             targets[t].feature, (int)targets[t].speed_cm_s);
+                }
                 pt->static_fired = true;
             }
             pt->last_moving = false;
@@ -405,9 +433,18 @@ static void process_person_motion(const area_config_t *cfg,
                 if (pt->moving_confirm_since == 0) {
                     pt->moving_confirm_since = now;
                 } else if ((now - pt->moving_confirm_since) >= moving_need) {
-                    snprintf(msg, sizeof(msg), "人员在%s恢复运动", area_name);
-                    emit_mmwave(DEVICE_EVENT_PERSON_MOVING, area_id, area_name,
-                                (int)targets[t].index, -1, -1, msg);
+                    snprintf(msg, sizeof(msg),
+                             "人员#%u在%s有%s",
+                             (unsigned)targets[t].index, area_name,
+                             kinesia_desc(targets[t].kinesia));
+                    if (emit_mmwave(DEVICE_EVENT_PERSON_MOVING, area_id, area_name,
+                                    (int)targets[t].index, -1, -1, msg)) {
+                        ESP_LOGI(TAG,
+                                 "person_moving person=%u area=%u \"%s\" kinesia=%u(%s) feature=0x%02X speed=%d",
+                                 (unsigned)targets[t].index, (unsigned)area_id, area_name,
+                                 targets[t].kinesia, kinesia_desc(targets[t].kinesia),
+                                 targets[t].feature, (int)targets[t].speed_cm_s);
+                    }
                     pt->static_fired = false;
                     pt->moving_confirm_since = 0;
                 }
@@ -573,25 +610,81 @@ static void process_range_events(const c4004_target_info_t *targets, uint8_t n, 
     }
 }
 
+static bool tag_rect_cm(const area_tag_t *tag, float *min_x, float *max_x,
+                        float *min_y, float *max_y, float *cx, float *cy);
+
+#ifndef CONFIG_EVENT_BOUNDARY_COOLDOWN_MS
+#define CONFIG_EVENT_BOUNDARY_COOLDOWN_MS 800
+#endif
+#ifndef CONFIG_EVENT_BOUNDARY_CONFIRM_MS
+#define CONFIG_EVENT_BOUNDARY_CONFIRM_MS 400
+#endif
+
+typedef struct {
+    bool used;
+    uint8_t person;
+    bool inside;
+    TickType_t last_seen;
+    TickType_t enter_since;
+    TickType_t exit_since;
+} boundary_person_t;
+
+static boundary_person_t s_bd_person[AREA_TAG_MAX][PERSON_TRACK_MAX];
+static TickType_t s_enter_cooldown_until[AREA_TAG_MAX];
+static TickType_t s_exit_cooldown_until[AREA_TAG_MAX];
+
 static bool emit_area_crossing(uint8_t area_id,
                                bool is_enter,
                                const char *area_name,
+                               int person_id,
                                int active,
-                               int static_count)
+                               int static_count,
+                               TickType_t now,
+                               bool with_cooldown)
 {
+    if (with_cooldown) {
+        TickType_t *cool = is_enter ? &s_enter_cooldown_until[area_id]
+                                    : &s_exit_cooldown_until[area_id];
+        if (*cool != 0 && now < *cool) {
+            return false;
+        }
+    }
+
     char message[EVENT_MSG_LEN];
     if (is_enter) {
+        if (person_id >= 0) {
+            snprintf(message, sizeof(message),
+                     "人员#%d进入%s，该区域有%d人活动，%d人静止",
+                     person_id, area_name, active, static_count);
+        } else {
+            snprintf(message, sizeof(message),
+                     "有人进入%s区域，该区域有%d人活动，%d人静止",
+                     area_name, active, static_count);
+        }
+    } else if (person_id >= 0) {
         snprintf(message, sizeof(message),
-                 "有人进入%s区域，该区域有%d人活动，%d人静止",
-                 area_name, active, static_count);
+                 "人员#%d离开%s，该区域有%d人活动，%d人静止",
+                 person_id, area_name, active, static_count);
     } else {
         snprintf(message, sizeof(message),
                  "有人离开%s区域，该区域有%d人活动，%d人静止",
                  area_name, active, static_count);
     }
 
-    emit_mmwave(is_enter ? DEVICE_EVENT_AREA_ENTER : DEVICE_EVENT_AREA_EXIT,
-                area_id, area_name, -1, active, static_count, message);
+    if (!emit_mmwave(is_enter ? DEVICE_EVENT_AREA_ENTER : DEVICE_EVENT_AREA_EXIT,
+                     area_id, area_name, person_id, active, static_count, message)) {
+        return false;
+    }
+
+    if (with_cooldown) {
+        TickType_t *cool = is_enter ? &s_enter_cooldown_until[area_id]
+                                    : &s_exit_cooldown_until[area_id];
+        *cool = now + pdMS_TO_TICKS(CONFIG_EVENT_BOUNDARY_COOLDOWN_MS);
+    }
+
+    ESP_LOGI(TAG, "%s area=%u \"%s\" person=%d",
+             is_enter ? "area_enter" : "area_exit",
+             (unsigned)area_id, area_name, person_id);
 
     if (is_enter) {
         s_post_empty_guard_until = 0;
@@ -647,7 +740,7 @@ static void process_strategy1_crossing(uint8_t i,
     if (stable > reported) {
         const int delta = stable - reported;
         for (int n = 0; n < delta; n++) {
-            (void)emit_area_crossing(i, true, tag->name, active, static_count);
+            (void)emit_area_crossing(i, true, tag->name, -1, active, static_count, now, false);
         }
         track->reported_total = stable;
         track->count_stable_since = 0;
@@ -660,7 +753,7 @@ static void process_strategy1_crossing(uint8_t i,
         if (should_suppress_area_exit(range_occupied, stable, now)) {
             break;
         }
-        if (emit_area_crossing(i, false, tag->name, active, static_count)) {
+        if (emit_area_crossing(i, false, tag->name, -1, active, static_count, now, false)) {
             emitted++;
         }
     }
@@ -674,9 +767,16 @@ static void process_strategy1_crossing(uint8_t i,
     }
 }
 
+/**
+ * strategy=2 边界/边缘门：
+ * 1) C4004 TAG_REPORT 进出脉冲上升沿立即上报
+ * 2) 轨迹穿越标签矩形（外→内 enter，内→外 exit）兜底
+ */
 static void process_strategy2_crossing(uint8_t i,
                                        const area_tag_t *tag,
                                        const area_status_t *st,
+                                       const c4004_target_info_t *targets,
+                                       uint8_t tcount,
                                        int active,
                                        int static_count,
                                        TickType_t now,
@@ -685,34 +785,130 @@ static void process_strategy2_crossing(uint8_t i,
 {
     tag_track_t *track = &s_tag_track[i];
 
+    /* ---- 路径 A：模块主动上报 ---- */
     if (st->enter && !track->last_enter) {
-        track->enter_confirm_since = now;
-        track->exit_confirm_since = 0;
+        (void)emit_area_crossing(i, true, tag->name, -1, active, static_count, now, true);
+        track->reported_total = 1;
     }
     if (st->exit && !track->last_exit) {
-        track->exit_confirm_since = now;
-        track->enter_confirm_since = 0;
+        if (!should_suppress_area_exit(range_occupied, 0, now)) {
+            (void)emit_area_crossing(i, false, tag->name, -1, active, static_count, now, true);
+            track->reported_total = 0;
+        }
     }
     track->last_enter = st->enter;
     track->last_exit = st->exit;
 
-    if (track->enter_confirm_since != 0 &&
-            (now - track->enter_confirm_since) >= confirm) {
-        if (!track->session_open) {
-            (void)emit_area_crossing(i, true, tag->name, active, static_count);
-            track->reported_total = 1;
+    /* ---- 路径 B：轨迹进出标签矩形 ---- */
+    float min_x, max_x, min_y, max_y, cx, cy;
+    if (!tag_rect_cm(tag, &min_x, &max_x, &min_y, &max_y, &cx, &cy) || targets == NULL) {
+        return;
+    }
+    (void)cx;
+    (void)cy;
+
+    bool seen[PERSON_TRACK_MAX] = {false};
+    const TickType_t gap = pdMS_TO_TICKS(CONFIG_EVENT_RANGE_OCC_GAP_MS);
+
+    for (uint8_t t = 0; t < tcount; t++) {
+        const float x = (float)targets[t].x_cm;
+        const float y = (float)targets[t].y_cm;
+        if (area_point_in_noise_zone(x, y)) {
+            continue;
         }
-        track->enter_confirm_since = 0;
+
+        const bool in_rect = (x >= min_x && x <= max_x && y >= min_y && y <= max_y);
+
+        boundary_person_t *bp = NULL;
+        for (int k = 0; k < PERSON_TRACK_MAX; k++) {
+            if (s_bd_person[i][k].used && s_bd_person[i][k].person == targets[t].index) {
+                bp = &s_bd_person[i][k];
+                seen[k] = true;
+                break;
+            }
+        }
+        if (bp == NULL) {
+            for (int k = 0; k < PERSON_TRACK_MAX; k++) {
+                if (!s_bd_person[i][k].used) {
+                    bp = &s_bd_person[i][k];
+                    memset(bp, 0, sizeof(*bp));
+                    bp->used = true;
+                    bp->person = targets[t].index;
+                    bp->inside = in_rect;
+                    bp->last_seen = now;
+                    seen[k] = true;
+                    break;
+                }
+            }
+        }
+        if (bp == NULL) {
+            continue;
+        }
+
+        bp->last_seen = now;
+
+        if (in_rect) {
+            bp->exit_since = 0;
+            if (!bp->inside) {
+                if (bp->enter_since == 0) {
+                    bp->enter_since = now;
+                } else if ((now - bp->enter_since) >= confirm) {
+                    if (emit_area_crossing(i, true, tag->name, (int)bp->person,
+                                           active, static_count, now, true)) {
+                        bp->inside = true;
+                        track->reported_total = 1;
+                    }
+                    bp->enter_since = 0;
+                }
+            } else {
+                bp->enter_since = 0;
+            }
+        } else {
+            bp->enter_since = 0;
+            if (bp->inside) {
+                if (bp->exit_since == 0) {
+                    bp->exit_since = now;
+                } else if ((now - bp->exit_since) >= confirm) {
+                    if (!should_suppress_area_exit(range_occupied, 0, now) &&
+                        emit_area_crossing(i, false, tag->name, (int)bp->person,
+                                           active, static_count, now, true)) {
+                        bp->inside = false;
+                        track->reported_total = 0;
+                    }
+                    bp->exit_since = 0;
+                }
+            } else {
+                bp->exit_since = 0;
+            }
+        }
     }
 
-    if (track->exit_confirm_since != 0 &&
-            (now - track->exit_confirm_since) >= confirm) {
-        if (!should_suppress_area_exit(range_occupied, 0, now)) {
-            (void)emit_area_crossing(i, false, tag->name, active, static_count);
-            track->reported_total = 0;
-            track->session_open = false;
+    for (int k = 0; k < PERSON_TRACK_MAX; k++) {
+        boundary_person_t *bp = &s_bd_person[i][k];
+        if (!bp->used) {
+            continue;
         }
-        track->exit_confirm_since = 0;
+        if (seen[k]) {
+            continue;
+        }
+        /* 短暂丢目标：仍按上次 inside 状态；超时再清槽 */
+        if ((now - bp->last_seen) < gap) {
+            continue;
+        }
+        if (bp->inside) {
+            if (bp->exit_since == 0) {
+                bp->exit_since = now;
+            } else if ((now - bp->exit_since) >= confirm) {
+                if (!should_suppress_area_exit(range_occupied, 0, now)) {
+                    (void)emit_area_crossing(i, false, tag->name, (int)bp->person,
+                                             active, static_count, now, true);
+                    track->reported_total = 0;
+                }
+                memset(bp, 0, sizeof(*bp));
+            }
+        } else {
+            memset(bp, 0, sizeof(*bp));
+        }
     }
 }
 
@@ -963,6 +1159,7 @@ static void process_area_events(const area_config_t *cfg,
                                 TickType_t now)
 {
     const TickType_t confirm = pdMS_TO_TICKS(CONFIG_EVENT_AREA_CONFIRM_MS);
+    const TickType_t bd_confirm = pdMS_TO_TICKS(CONFIG_EVENT_BOUNDARY_CONFIRM_MS);
     const TickType_t ap_confirm = pdMS_TO_TICKS(CONFIG_EVENT_RANGE_CONFIRM_MS);
 
     for (uint8_t i = 0; i < cfg->tag_count; i++) {
@@ -973,8 +1170,8 @@ static void process_area_events(const area_config_t *cfg,
         get_tag_people_count(i, cfg, areas, &active, &static_count);
 
         if (tag->strategy == 2) {
-            process_strategy2_crossing(i, tag, st, active, static_count, now, confirm,
-                                       range_occupied);
+            process_strategy2_crossing(i, tag, st, targets, tcount, active, static_count,
+                                       now, bd_confirm, range_occupied);
         } else if (tag->strategy == 1) {
             process_strategy1_crossing(i, tag, cfg, areas, now, confirm, range_occupied);
         } else if (tag->strategy == 3) {
@@ -1010,36 +1207,51 @@ static void process_snapshot(const area_config_t *cfg, const area_status_t *area
                  "range watch: ready=%d targets=%u in_range=%d inside=%d web_ev=%u",
                  (int)c4004_sensor_is_ready(), (unsigned)tcount, range_people,
                  tracked_inside, (unsigned)s_web_range_count);
+        for (uint8_t t = 0; t < tcount && t < 8; t++) {
+            ESP_LOGI(TAG,
+                     "  motion person=%u kinesia=%u(%s) feature=0x%02X speed=%d cm/s moving=%d pos=(%d,%d)cm",
+                     (unsigned)s_poll_targets[t].index,
+                     s_poll_targets[t].kinesia,
+                     kinesia_desc(s_poll_targets[t].kinesia),
+                     s_poll_targets[t].feature,
+                     (int)s_poll_targets[t].speed_cm_s,
+                     (int)s_poll_targets[t].moving,
+                     (int)s_poll_targets[t].x_cm,
+                     (int)s_poll_targets[t].y_cm);
+        }
         if (cfg != NULL && areas != NULL) {
             for (uint8_t i = 0; i < cfg->tag_count; i++) {
-                if (cfg->tags[i].strategy != 3) {
-                    continue;
-                }
-                ESP_LOGI(TAG, "  approach_tag[%u] \"%s\" approaching=%d leaving=%d",
-                         (unsigned)i, cfg->tags[i].name,
-                         (int)areas[i].approaching, (int)areas[i].leaving);
-                float min_x, max_x, min_y, max_y, cx, cy;
-                if (!tag_rect_cm(&cfg->tags[i], &min_x, &max_x, &min_y, &max_y, &cx, &cy)) {
-                    continue;
-                }
-                (void)cx;
-                (void)cy;
-                float best = 1.0e9f;
-                int best_id = -1;
-                for (uint8_t t = 0; t < tcount; t++) {
-                    const float d = dist_to_rect_cm((float)s_poll_targets[t].x_cm,
-                                                    (float)s_poll_targets[t].y_cm,
-                                                    min_x, max_x, min_y, max_y);
-                    if (d < best) {
-                        best = d;
-                        best_id = (int)s_poll_targets[t].index;
+                if (cfg->tags[i].strategy == 2) {
+                    ESP_LOGI(TAG, "  boundary_tag[%u] \"%s\" enter=%d exit=%d",
+                             (unsigned)i, cfg->tags[i].name,
+                             (int)areas[i].enter, (int)areas[i].exit);
+                } else if (cfg->tags[i].strategy == 3) {
+                    ESP_LOGI(TAG, "  approach_tag[%u] \"%s\" approaching=%d leaving=%d",
+                             (unsigned)i, cfg->tags[i].name,
+                             (int)areas[i].approaching, (int)areas[i].leaving);
+                    float min_x, max_x, min_y, max_y, cx, cy;
+                    if (!tag_rect_cm(&cfg->tags[i], &min_x, &max_x, &min_y, &max_y, &cx, &cy)) {
+                        continue;
                     }
-                }
-                if (best_id >= 0) {
-                    ESP_LOGI(TAG, "    nearest person=%d dist_to_tag=%.0fcm (need move >=%dcm)",
-                             best_id, best, CONFIG_EVENT_APPROACH_TRIGGER_CM);
-                } else {
-                    ESP_LOGI(TAG, "    no targets to track");
+                    (void)cx;
+                    (void)cy;
+                    float best = 1.0e9f;
+                    int best_id = -1;
+                    for (uint8_t t = 0; t < tcount; t++) {
+                        const float d = dist_to_rect_cm((float)s_poll_targets[t].x_cm,
+                                                        (float)s_poll_targets[t].y_cm,
+                                                        min_x, max_x, min_y, max_y);
+                        if (d < best) {
+                            best = d;
+                            best_id = (int)s_poll_targets[t].index;
+                        }
+                    }
+                    if (best_id >= 0) {
+                        ESP_LOGI(TAG, "    nearest person=%d dist_to_tag=%.0fcm (need move >=%dcm)",
+                                 best_id, best, CONFIG_EVENT_APPROACH_TRIGGER_CM);
+                    } else {
+                        ESP_LOGI(TAG, "    no targets to track");
+                    }
                 }
             }
         }
@@ -1099,6 +1311,9 @@ void radar_events_reset_state(void)
     memset(s_ap_person, 0, sizeof(s_ap_person));
     memset(s_approach_cooldown_until, 0, sizeof(s_approach_cooldown_until));
     memset(s_away_cooldown_until, 0, sizeof(s_away_cooldown_until));
+    memset(s_bd_person, 0, sizeof(s_bd_person));
+    memset(s_enter_cooldown_until, 0, sizeof(s_enter_cooldown_until));
+    memset(s_exit_cooldown_until, 0, sizeof(s_exit_cooldown_until));
     s_range_occupied = false;
     s_room_empty_fired = false;
     s_range_empty_since = 0;

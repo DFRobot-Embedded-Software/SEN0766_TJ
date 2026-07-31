@@ -429,6 +429,7 @@ static esp_err_t api_mmwave_handler(httpd_req_t *req)
             cJSON_AddNumberToObject(t, "y", round1(infos[i].y_cm * WEB_M_PER_CM));
             cJSON_AddNumberToObject(t, "speed", infos[i].speed_cm_s);
             cJSON_AddNumberToObject(t, "kinesia", infos[i].kinesia);
+            cJSON_AddNumberToObject(t, "feature", infos[i].feature);
             cJSON_AddBoolToObject(t, "moving", infos[i].moving);
             cJSON_AddBoolToObject(t, "picked", (int)i == picked);
             cJSON_AddBoolToObject(t, "noise_suppressed", in_noise);

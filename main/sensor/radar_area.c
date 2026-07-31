@@ -125,15 +125,15 @@ esp_err_t area_coords_to_rect(const area_tag_t *tag, area_rect_t *out)
     out->width = (uint16_t)width_f;
     out->height = (uint16_t)height_f;
 
-    ESP_LOGI(TAG,
-             "coords->rect: P1(%.0f,%.0f) P2(%.0f,%.0f) P3(%.0f,%.0f) P4(%.0f,%.0f)"
-             " => center(%d,%d) size %ux%u cm",
-             tag->coords[0][0], tag->coords[0][1],
-             tag->coords[1][0], tag->coords[1][1],
-             tag->coords[2][0], tag->coords[2][1],
-             tag->coords[3][0], tag->coords[3][1],
-             (int)out->center_x, (int)out->center_y,
-             (unsigned)out->width, (unsigned)out->height);
+    // ESP_LOGD(TAG,
+    //          "coords->rect: P1(%.0f,%.0f) P2(%.0f,%.0f) P3(%.0f,%.0f) P4(%.0f,%.0f)"
+    //          " => center(%d,%d) size %ux%u cm",
+    //          tag->coords[0][0], tag->coords[0][1],
+    //          tag->coords[1][0], tag->coords[1][1],
+    //          tag->coords[2][0], tag->coords[2][1],
+    //          tag->coords[3][0], tag->coords[3][1],
+    //          (int)out->center_x, (int)out->center_y,
+    //          (unsigned)out->width, (unsigned)out->height);
     return ESP_OK;
 }
 

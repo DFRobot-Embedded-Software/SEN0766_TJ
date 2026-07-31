@@ -545,12 +545,12 @@ menu "4. 设备事件"
 
     config EVENT_PERSON_STATIC_MS
         int "人员静止确认 (ms)"
-        default 60000
-        range 5000 600000
+        default 5000
+        range 2000 600000
 
     config EVENT_PERSON_MOVING_CONFIRM_MS
         int "恢复运动确认 (ms)"
-        default 2000
+        default 1000
         range 500 30000
 
     config MCP_RADAR_CROSSING_COOLDOWN_MS

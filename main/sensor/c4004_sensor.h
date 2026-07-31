@@ -55,13 +55,14 @@ esp_err_t c4004_sensor_count_targets_in_rect(const area_rect_t *rect, int *activ
  */
 esp_err_t c4004_sensor_sync_install(void);
 
-/** @brief 轨迹目标快照（厘米，雷达坐标系） */
+/** @brief 轨迹目标快照（厘米，雷达坐标系；字段对齐 DFRobot sTargetInfo_t） */
 typedef struct {
     uint8_t index;
-    uint8_t kinesia;
+    uint8_t kinesia;   /**< 体动幅度 0~100：0无人 1仅呼吸 2~30小幅 31~60缓慢 61~100快速 */
+    uint8_t feature;   /**< 0静止 1运动 2不确定 */
     int16_t x_cm;
     int16_t y_cm;
-    int16_t speed_cm_s;
+    int16_t speed_cm_s; /**< 正=靠近雷达，负=远离雷达 */
     bool moving;
 } c4004_target_info_t;
 
