@@ -22,6 +22,7 @@
 #include "freertos/ringbuf.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "rgb_ui.h"
 #include "sdkconfig.h"
 
 #if CONFIG_AUDIO_WS_ENABLE
@@ -89,6 +90,26 @@ static size_t s_rx_bytes_total;
 static int s_send_fail_streak;
 static int64_t s_cooldown_until_us;
 static char s_auth_headers[192];
+
+static void voice_listen(void)
+{
+    rgb_ui_set_voice(RGB_VOICE_LISTEN);
+}
+
+static void voice_process(void)
+{
+    rgb_ui_set_voice(RGB_VOICE_PROCESS);
+}
+
+static void voice_play(void)
+{
+    rgb_ui_set_voice(RGB_VOICE_PLAY);
+}
+
+static void voice_idle(void)
+{
+    rgb_ui_set_voice(RGB_VOICE_NONE);
+}
 
 static void post_cmd(ws_cmd_t cmd, const char *reason);
 
@@ -190,6 +211,7 @@ static void destroy_client(void)
     s_send_fail_streak = 0;
     drain_rb(s_tx_rb);
     drain_rb(s_rx_rb);
+    voice_idle();
 }
 
 static void arm_downlink_wait(void)
@@ -216,6 +238,7 @@ static void begin_uplink(void)
     s_uplink = true;
     s_play_primed = false;
     s_rx_bytes_total = 0;
+    voice_listen();
     send_text_op("{\"op\":\"uplink_start\",\"rate\":16000,\"format\":\"s16le\",\"channels\":1}");
     ESP_LOGI(TAG, "uplink started");
 }
@@ -305,6 +328,7 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base, int32_t 
         s_drain_then_close = false;
         drain_rb(s_tx_rb);
         drain_rb(s_rx_rb);
+        voice_idle();
         break;
 
     case WEBSOCKET_EVENT_DATA:
@@ -327,6 +351,7 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base, int32_t 
                     s_tx_inhibit = true;
                     s_uplink = false;
                     arm_downlink_wait();
+                    voice_process();
                     ESP_LOGD(TAG, "<< processing — refresh await");
                 } else if (strcmp(op->valuestring, "listen_stop") == 0 ||
                            strcmp(op->valuestring, "transcript") == 0 ||
@@ -335,6 +360,7 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base, int32_t 
                     s_uplink = false;
                     drain_rb(s_tx_rb);
                     arm_downlink_wait();
+                    voice_process();
                     ESP_LOGI(TAG, "<< %s — force stop uplink, await downlink", op->valuestring);
                     post_cmd(WS_CMD_LISTEN_STOP, "asr");
                 } else if (strcmp(op->valuestring, "error") == 0) {
@@ -353,6 +379,7 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base, int32_t 
                     s_play_primed = false;
                     s_rx_bytes_total = 0;
                     arm_downlink_wait();
+                    voice_play();
                     ESP_LOGI(TAG, "<< play_start");
                     post_cmd(WS_CMD_PLAY_START, "play");
                 } else if (strcmp(op->valuestring, "play_stop") == 0) {
@@ -374,6 +401,7 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base, int32_t 
                 s_drain_then_close = false;
                 s_play_primed = false;
                 s_rx_bytes_total = 0;
+                voice_play();
                 post_cmd(WS_CMD_PLAY_START, "play");
             }
             enqueue_downlink_pcm(data->data_ptr, data->data_len);
@@ -393,6 +421,7 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base, int32_t 
         if (!s_start_pending) {
             s_connected = false;
         }
+        voice_idle();
         break;
 
     default:
@@ -522,6 +551,7 @@ static void do_session_start(void)
     esp_err_t err = ensure_client_started();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "connect failed: %s", esp_err_to_name(err));
+        voice_idle();
         return;
     }
 
@@ -529,6 +559,7 @@ static void do_session_start(void)
         begin_uplink();
     } else {
         s_start_pending = true;
+        voice_listen();
         ESP_LOGI(TAG, "connecting to %s …", CONFIG_AUDIO_WS_URI);
     }
 }
@@ -544,6 +575,7 @@ static void do_uplink_eos(const char *reason)
     }
     if (s_connected) {
         arm_downlink_wait();
+        voice_process();
         ESP_LOGI(TAG, "await downlink (keep ws, silence_wd=%dms)", CONFIG_AUDIO_WS_DOWNLINK_WAIT_MS);
     }
 }
@@ -564,6 +596,7 @@ static void do_play_start(const char *reason)
     s_playing = true;
     s_play_primed = false;
     arm_downlink_wait();
+    voice_play();
     if (!ns4168_amp_is_ready()) {
         ESP_LOGE(TAG, "amp not ready — cannot play downlink");
         return;
@@ -581,6 +614,7 @@ static void do_listen_stop(const char *reason)
     drain_rb(s_tx_rb);
     if (s_connected) {
         arm_downlink_wait();
+        voice_process();
     }
     ESP_LOGI(TAG, "listen_stop done, await downlink (tx inhibited)");
 }
@@ -714,6 +748,7 @@ static void worker_task(void *arg)
                 s_await_downlink = false;
                 s_play_primed = false;
                 (void)ns4168_amp_set_enabled(false);
+                voice_idle();
                 /* 故意不 destroy：避免二次建连任务失败 / 下行被 RST 掐断 */
                 continue;
             }
@@ -726,6 +761,7 @@ static void worker_task(void *arg)
             s_playing = false;
             s_await_downlink = false;
             s_drain_then_close = false;
+            voice_idle();
             /* 仅网关长时间无活动时放行；inhibit 在 begin_uplink 清 */
             continue;
         }
@@ -784,6 +820,7 @@ static void worker_task(void *arg)
             drain_rb(s_tx_rb);
             drain_rb(s_rx_rb);
             s_cooldown_until_us = esp_timer_get_time() + 1500LL * 1000LL;
+            voice_idle();
             continue;
         }
         s_send_fail_streak = 0;

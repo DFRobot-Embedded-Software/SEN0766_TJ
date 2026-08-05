@@ -172,8 +172,7 @@ static esp_err_t boot_network(void)
 static void on_wakeword(void *ctx)
 {
     (void)ctx;
-    /* 唤醒成功灯效 → 自动进入拾音呼吸；超时回退下层 */
-    rgb_ui_set_voice(RGB_VOICE_WAKE_OK);
+    /* 灯效由 audio_ws：uplink→识别、processing→处理、play→播放 */
 }
 
 static void boot_audio(void)

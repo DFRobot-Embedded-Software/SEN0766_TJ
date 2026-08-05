@@ -1,6 +1,8 @@
 /**
  * @file rgb_ui.h
- * @brief RGB 灯效：语音 > 配网 > 日常
+ * @brief RGB 灯效：语音三态 > 配网 > 日常
+ *
+ * 语音仅三种状态：识别 / 处理 / 播放。
  */
 #pragma once
 
@@ -20,22 +22,19 @@ typedef enum {
     RGB_NET_FAIL,
 } rgb_net_t;
 
+/** 语音会话灯效（仅三态 + 空闲） */
 typedef enum {
-    RGB_VOICE_NONE = 0,
-    RGB_VOICE_WAKE_OK,
-    RGB_VOICE_LISTEN,
-    RGB_VOICE_PARSE,
-    RGB_VOICE_CMD_OK,
-    RGB_VOICE_CMD_FAIL,
-    RGB_VOICE_TTS,
-    RGB_VOICE_TIMEOUT,
+    RGB_VOICE_NONE = 0,   /**< 空闲，回到配网/日常层 */
+    RGB_VOICE_LISTEN,     /**< 识别音频：上行拾音 / ASR */
+    RGB_VOICE_PROCESS,    /**< 处理音频：等 Hermes / TTS 合成 */
+    RGB_VOICE_PLAY,       /**< 播放音频：下行 TTS */
 } rgb_voice_t;
 
 esp_err_t rgb_ui_init(void);
 void rgb_ui_set_net(rgb_net_t net);
 void rgb_ui_set_voice(rgb_voice_t voice);
-void rgb_ui_tts_level(uint8_t brightness); /**< 仅 TTS 阶段有效 */
 rgb_net_t rgb_ui_get_net(void);
+rgb_voice_t rgb_ui_get_voice(void);
 
 #ifdef __cplusplus
 }
