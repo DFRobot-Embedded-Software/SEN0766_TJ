@@ -42,8 +42,30 @@ bool audio_ws_client_is_playing(void);
 /**
  * 会话忙碌：上行 / 等下行 / 播放 / 已连接未收尾。
  * 唤醒侧应用此判断，避免中途重连打断。
+ * 续听窗口（followup armed）不算 busy。
  */
 bool audio_ws_client_is_busy(void);
+
+/**
+ * TTS 播完后的续听窗口是否激活（可凭 VAD 直接开上行，无需唤醒）。
+ * CONFIG_AUDIO_WS_FOLLOWUP_MS==0 时恒为 false。
+ */
+bool audio_ws_client_is_followup_armed(void);
+
+/**
+ * 续听窗口内检测到语音，或窗口内再次唤醒时调用：复用连接开上行。
+ * 与 session_start 相同排队路径。
+ */
+esp_err_t audio_ws_client_followup_begin(void);
+
+/**
+ * 上行已开但长时间未听到有效语音：停上行、发 dialog_idle、结束对话窗口。
+ * 不进入 await-downlink。
+ */
+void audio_ws_client_followup_nospeech_abort(void);
+
+/** AFE 已听到有效语音：取消空上行短超时。 */
+void audio_ws_client_notify_speech_heard(void);
 
 /** 采集 sink（一般由模块自行注册）。 */
 void audio_ws_client_on_pcm(const int16_t *pcm, size_t n_samples, void *ctx);

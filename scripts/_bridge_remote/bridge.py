@@ -20,9 +20,11 @@
   - Binary：16k s16le PCM → ns4168_amp_write
   - {"op":"play_stop"}   ← 网关 TTS 播完必须发送
   播放期间不重开上行。
-  设备在 play_stop 后保持连接，等待下一轮 uplink_start；
+  设备在 play_stop 后保持连接；若启用续听窗口则等语音再 uplink_start，
+  超时发 {"op":"dialog_idle"}，之后需再唤醒。
   网关同样保持连接，不再每轮强制 close（避免下行被掐断、二次建连失败）。
   设备等待下行不靠「猜总耗时」，而靠 processing 心跳 + play_stop 结束。
+  多轮上下文交给爱马仕（X-Hermes-Session-Id）；dialog_idle / 断线时丢弃 session id。
 
 用法：
   export DASHSCOPE_API_KEY=sk-xxx
@@ -38,7 +40,7 @@ import logging
 import os
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import dashscope
 import httpx
@@ -80,6 +82,14 @@ HERMES_HTTP_TIMEOUT_S = float(os.environ.get("HERMES_HTTP_TIMEOUT_S", "120"))
 PROCESSING_HEARTBEAT_S = float(os.environ.get("PROCESSING_HEARTBEAT_S", "5"))
 # 1=流式 CosyVoice；0=批量合成再分块下发（更稳，推荐）
 USE_STREAM_TTS = os.environ.get("USE_STREAM_TTS", "0") == "1"
+# 设备漏发 dialog_idle 时的兜底：丢弃爱马仕 session（秒）；略长于设备 FOLLOWUP_MS
+DIALOG_IDLE_FALLBACK_S = float(os.environ.get("DIALOG_IDLE_FALLBACK_S", "12"))
+
+HERMES_SYSTEM_PROMPT = (
+    "你是语音助手。用户会询问传感器温湿度、CO2 等。"
+    "优先使用可用工具/MCP 查询真实数据，用一两句中文简洁回答；"
+    "查不到就如实说明，不要猜测数值。"
+)
 
 
 def _tts_audio_format() -> AudioFormat:
@@ -115,34 +125,39 @@ def _json(op: str, **kwargs) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 爱马仕
+# 爱马仕（服务端会话；本地不拼多轮 messages）
 # ---------------------------------------------------------------------------
 
-def ask_hermes(user_text: str) -> str:
+def ask_hermes(user_text: str, session_id: Optional[str] = None) -> tuple[str, Optional[str]]:
+    """调用 Hermes chat/completions。
+
+    返回 (reply, session_id)。续聊时带上 X-Hermes-Session-Id，由爱马仕 SessionDB
+    加载历史；body 只发本轮新消息。无 session_id 时为首轮，附带 system。
+    """
     text = (user_text or "").strip()
     if not text:
-        return "我没有听清，请再说一次。"
+        return "我没有听清，请再说一次。", session_id
 
     if not HERMES_API_KEY:
         log.warning("未配置 HERMES_API_KEY，使用 mock 回复")
-        return _mock_hermes(text, reason="no_key")
+        return _mock_hermes(text, reason="no_key"), session_id
 
     url = f"{HERMES_API_BASE}/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {HERMES_API_KEY}",
         "Content-Type": "application/json",
     }
-    body = {
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "你是语音助手。用户会询问传感器温湿度等。"
-                    "优先使用可用工具/MCP 查询真实数据，用一两句中文简洁回答。"
-                ),
-            },
+    if session_id:
+        headers["X-Hermes-Session-Id"] = session_id
+        messages: list[dict[str, Any]] = [{"role": "user", "content": text}]
+    else:
+        messages = [
+            {"role": "system", "content": HERMES_SYSTEM_PROMPT},
             {"role": "user", "content": text},
-        ],
+        ]
+
+    body: dict[str, Any] = {
+        "messages": messages,
         "stream": False,
     }
     if HERMES_MODEL:
@@ -154,14 +169,18 @@ def ask_hermes(user_text: str) -> str:
             r.raise_for_status()
             data = r.json()
         reply = data["choices"][0]["message"]["content"]
-        return (reply or "").strip() or "查询完成，但没有返回内容。"
+        reply = (reply or "").strip() or "查询完成，但没有返回内容。"
+        new_sid = (r.headers.get("X-Hermes-Session-Id") or session_id or "").strip() or None
+        if new_sid and new_sid != session_id:
+            log.info("Hermes session_id=%s", new_sid)
+        return reply, new_sid
     except Exception as e:
         log.warning("调用爱马仕失败，回退 mock: %s", e)
-        return _mock_hermes(text, reason=str(e))
+        return _mock_hermes(text, reason=str(e)), session_id
 
 
 def _mock_hermes(text: str, reason: str = "") -> str:
-    if any(k in text for k in ("温湿", "温度", "湿度", "sensor", "温")):
+    if any(k in text for k in ("温湿", "温度", "湿度", "sensor", "温", "二氧化碳", "CO2", "co2")):
         return "当前温度二十五点三摄氏度，湿度百分之六十。这是模拟数据。"
     if reason:
         return f"我听到了：{text}。助手暂时响应超时，请稍后再试。"
@@ -360,6 +379,41 @@ class DeviceSession:
         self._closed = False
         self._asr_stopping = False  # 主动 stop 后忽略迟到的 timeout
         self._finalize_task: Optional[asyncio.Task] = None
+        self.hermes_session_id: Optional[str] = None
+        self._idle_task: Optional[asyncio.Task] = None
+
+    def reset_dialog(self) -> None:
+        """结束语音对话窗口：丢弃爱马仕 session，下次唤醒开新会话。"""
+        if self.hermes_session_id:
+            log.info("丢弃 Hermes session_id=%s", self.hermes_session_id)
+        self.hermes_session_id = None
+
+    def _cancel_idle_timer(self) -> None:
+        if self._idle_task and not self._idle_task.done():
+            self._idle_task.cancel()
+        self._idle_task = None
+
+    def _arm_idle_timer(self) -> None:
+        """设备漏发 dialog_idle 时的兜底：丢弃 Hermes session。"""
+        self._cancel_idle_timer()
+        if DIALOG_IDLE_FALLBACK_S <= 0:
+            return
+
+        async def _idle() -> None:
+            try:
+                await asyncio.sleep(DIALOG_IDLE_FALLBACK_S)
+            except asyncio.CancelledError:
+                return
+            if self._closed or self._busy or self.playing or self.uplink_enabled:
+                return
+            log.info("dialog idle fallback (%.0fs) — reset hermes session", DIALOG_IDLE_FALLBACK_S)
+            self.reset_dialog()
+
+        self._idle_task = asyncio.create_task(_idle())
+
+    def on_dialog_idle(self) -> None:
+        self._cancel_idle_timer()
+        self.reset_dialog()
 
     def start_asr(self) -> None:
         """每次 uplink_start 新建一路 ASR；不要在整个 WS 生命周期空挂。"""
@@ -490,7 +544,9 @@ class DeviceSession:
 
             hb_task = asyncio.create_task(_processing_heartbeat())
             try:
-                reply = await asyncio.to_thread(ask_hermes, text)
+                reply, self.hermes_session_id = await asyncio.to_thread(
+                    ask_hermes, text, self.hermes_session_id
+                )
             finally:
                 stop_hb.set()
                 try:
@@ -498,7 +554,11 @@ class DeviceSession:
                 except Exception:
                     pass
 
-            log.info("Hermes 回复: %s", reply)
+            log.info(
+                "Hermes 回复: %s (session=%s)",
+                reply,
+                self.hermes_session_id or "-",
+            )
             if not self._closed:
                 await self.conn.send(_json("reply", text=reply))
 
@@ -581,6 +641,7 @@ class DeviceSession:
                 await asyncio.sleep(PLAY_STOP_SETTLE_MS / 1000.0)
                 self.playing = False
                 log.info("下行 TTS 结束（保持 WebSocket，等待下一轮）")
+                self._arm_idle_timer()
         except Exception as e:
             self.playing = False
             log.exception("处理句子失败: %s", e)
@@ -590,6 +651,7 @@ class DeviceSession:
                     await self.conn.send(_json("play_stop"))
             except Exception:
                 pass
+            self._arm_idle_timer()
         finally:
             with self._lock:
                 self._busy = False
@@ -643,6 +705,8 @@ class DeviceSession:
         self._closed = True
         self.uplink_enabled = False
         self.playing = False
+        self._cancel_idle_timer()
+        self.reset_dialog()
         self.stop_asr(reason="session_close")
 
 
@@ -709,8 +773,9 @@ async def handle_device(conn: ServerConnection) -> None:
                 session.last_partial = ""
                 session.got_final = False
                 session.uplink_enabled = True
+                session._cancel_idle_timer()
                 session.start_asr()  # 每次上行单独开 ASR
-                log.info("uplink_start")
+                log.info("uplink_start (hermes_session=%s)", session.hermes_session_id or "new")
                 await conn.send(_json("uplink_ack", status="started"))
 
             elif op == "uplink_stop":
@@ -719,6 +784,11 @@ async def handle_device(conn: ServerConnection) -> None:
                     log.info("已在收尾中，忽略重复 uplink_stop")
                     continue
                 session._finalize_task = asyncio.create_task(session.on_uplink_stop(reason))
+
+            elif op == "dialog_idle":
+                log.info("dialog_idle — 续听结束，丢弃 Hermes session")
+                session.on_dialog_idle()
+                await conn.send(_json("dialog_idle_ack"))
 
             elif op == "ping":
                 await conn.send(_json("pong", t=time.time()))

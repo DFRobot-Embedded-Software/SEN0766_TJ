@@ -146,11 +146,13 @@ static void fetch_task(void *arg)
             }
 #if CONFIG_ESP_SR_WAKE_START_STREAM
 #if CONFIG_AUDIO_WS_ENABLE
-            /* 会话进行中（上行/等 TTS/播放）禁止重连，避免打爆 ASR */
+            /* 上行/等 TTS/播放中禁止；续听窗口不算 busy，可直接开上行 */
             if (!audio_ws_client_is_busy()) {
                 s_vad_silence_us = 0;
                 s_vad_heard_speech = false;
-                esp_err_t err = audio_ws_client_session_start();
+                esp_err_t err = audio_ws_client_is_followup_armed()
+                                    ? audio_ws_client_followup_begin()
+                                    : audio_ws_client_session_start();
                 if (err != ESP_OK) {
                     ESP_LOGW(TAG, "audio_ws_client_session_start: %s", esp_err_to_name(err));
                 }
@@ -167,8 +169,27 @@ static void fetch_task(void *arg)
         }
 
 #if CONFIG_ESP_SR_WAKE_START_STREAM && CONFIG_AUDIO_WS_ENABLE
+        if (audio_ws_client_is_followup_armed() && !audio_ws_client_is_busy() &&
+            !audio_ws_client_is_uplink_active()) {
+            if (res->vad_state == VAD_SPEECH) {
+                ESP_LOGI(TAG, "followup speech — begin uplink");
+                s_vad_silence_us = 0;
+                s_vad_heard_speech = true;
+                esp_err_t err = audio_ws_client_followup_begin();
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "followup_begin: %s", esp_err_to_name(err));
+                    s_vad_heard_speech = false;
+                } else {
+                    audio_ws_client_notify_speech_heard();
+                }
+            }
+        }
+
         if (audio_ws_client_is_uplink_active() && !audio_ws_client_is_playing()) {
             if (res->vad_state == VAD_SPEECH) {
+                if (!s_vad_heard_speech) {
+                    audio_ws_client_notify_speech_heard();
+                }
                 s_vad_heard_speech = true;
                 s_vad_silence_us = 0;
             } else if (res->vad_state == VAD_SILENCE) {

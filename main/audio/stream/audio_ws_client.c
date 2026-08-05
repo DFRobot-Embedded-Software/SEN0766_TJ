@@ -2,7 +2,7 @@
  * @file audio_ws_client.c
  * @brief WebSocket 客户端音频会话（上行 mic / 下行 amp）
  *
- * 会话：connect → uplink_start → PCM → uplink_stop → 等下行 → play_stop/超时 → 断开。
+ * 会话：connect → uplink → 等下行 → play_stop 排空 → 可选续听窗口 → 再 uplink 或 dialog_idle。
  * 关键：事件回调里禁止阻塞（尤其禁止 ns4168_amp_write）；下行 PCM 入 ring，由 worker 播放。
  */
 #include "audio_ws_client.h"
@@ -57,6 +57,8 @@ typedef enum {
     WS_CMD_BEGIN_UPLINK,
     WS_CMD_PLAY_START, /* 停上行(若仍在) + 开功放 */
     WS_CMD_LISTEN_STOP, /* 网关 ASR 出句，立刻停上行 */
+    WS_CMD_DIALOG_IDLE, /* 续听超时 / FOLLOWUP=0：通知网关清上下文 */
+    WS_CMD_FOLLOWUP_ABORT, /* 上行已开但无语音：停上行 + dialog_idle，不 await */
 } ws_cmd_t;
 
 typedef struct {
@@ -82,8 +84,13 @@ static volatile bool s_await_downlink;
 static volatile bool s_drain_then_close;
 static volatile bool s_ws_dead; /* 连接已废，下一轮 session_start 再 destroy+重建 */
 static volatile bool s_play_primed; /* 已攒够预缓冲，开始真正写功放 */
+static volatile bool s_followup_armed; /* 播完后续听窗口（不算 busy） */
+static volatile bool s_uplink_expect_speech; /* 本轮上行需先听到语音，否则短超时 abort */
+static volatile bool s_speech_preheard; /* begin_uplink 前已确认有语音（消异步竞态） */
 static int64_t s_deadline_us;
 static int64_t s_downlink_deadline_us;
+static int64_t s_followup_deadline_us;
+static int64_t s_nospeech_deadline_us;
 static int64_t s_tx_origin_us;
 static size_t s_tx_samples_sent;
 static size_t s_rx_bytes_total;
@@ -150,7 +157,7 @@ static void make_room(RingbufHandle_t rb, size_t capacity, size_t need_bytes)
 
 static void send_text_op(const char *json)
 {
-    if (s_client == NULL || !s_connected || json == NULL || s_tx_inhibit) {
+    if (s_client == NULL || !s_connected || json == NULL) {
         return;
     }
     int n = (int)strlen(json);
@@ -160,6 +167,14 @@ static void send_text_op(const char *json)
     } else {
         ESP_LOGI(TAG, ">> %s", json);
     }
+}
+
+static void send_text_op_if_tx_ok(const char *json)
+{
+    if (s_tx_inhibit) {
+        return;
+    }
+    send_text_op(json);
 }
 
 static void stop_uplink_locked(const char *reason)
@@ -178,7 +193,7 @@ static void stop_uplink_locked(const char *reason)
     snprintf(msg, sizeof(msg),
              "{\"op\":\"uplink_stop\",\"reason\":\"%s\"}",
              (reason && reason[0]) ? reason : "manual");
-    send_text_op(msg);
+    send_text_op_if_tx_ok(msg);
     vTaskDelay(pdMS_TO_TICKS(30));
     ESP_LOGI(TAG, "uplink stopped (%s)", reason ? reason : "manual");
 }
@@ -208,6 +223,11 @@ static void destroy_client(void)
     s_drain_then_close = false;
     s_ws_dead = false;
     s_play_primed = false;
+    s_followup_armed = false;
+    s_uplink_expect_speech = false;
+    s_speech_preheard = false;
+    s_followup_deadline_us = 0;
+    s_nospeech_deadline_us = 0;
     s_send_fail_streak = 0;
     drain_rb(s_tx_rb);
     drain_rb(s_rx_rb);
@@ -223,8 +243,67 @@ static void arm_downlink_wait(void)
         esp_timer_get_time() + (int64_t)CONFIG_AUDIO_WS_DOWNLINK_WAIT_MS * 1000LL;
 }
 
+static void clear_followup(void)
+{
+    s_followup_armed = false;
+    s_followup_deadline_us = 0;
+}
+
+static void send_dialog_idle(void)
+{
+    /* 播完后可能仍标着 listen_stop 的 tx_inhibit，dialog_idle 必须能发出 */
+    s_tx_inhibit = false;
+    send_text_op("{\"op\":\"dialog_idle\"}");
+}
+
+static void do_dialog_idle(void)
+{
+    clear_followup();
+    s_uplink_expect_speech = false;
+    s_nospeech_deadline_us = 0;
+    if (s_connected) {
+        send_dialog_idle();
+    }
+    voice_idle();
+    ESP_LOGI(TAG, "dialog_idle (need wake for next turn)");
+}
+
+static void arm_followup_or_idle(void)
+{
+    s_tx_inhibit = false;
+    if (CONFIG_AUDIO_WS_FOLLOWUP_MS > 0 && s_connected) {
+        s_followup_armed = true;
+        s_followup_deadline_us =
+            esp_timer_get_time() + (int64_t)CONFIG_AUDIO_WS_FOLLOWUP_MS * 1000LL;
+        voice_listen();
+        ESP_LOGI(TAG, "followup armed (%d ms)", CONFIG_AUDIO_WS_FOLLOWUP_MS);
+    } else {
+        do_dialog_idle();
+    }
+}
+
+static void do_followup_nospeech_abort(void)
+{
+    ESP_LOGI(TAG, "followup uplink no-speech — abort");
+    s_start_pending = false;
+    s_uplink_expect_speech = false;
+    s_nospeech_deadline_us = 0;
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) == pdTRUE) {
+        stop_uplink_locked("manual");
+        xSemaphoreGive(s_lock);
+    } else {
+        s_uplink = false;
+    }
+    s_await_downlink = false;
+    s_playing = false;
+    s_drain_then_close = false;
+    do_dialog_idle();
+}
+
 static void begin_uplink(void)
 {
+    const bool from_followup = s_followup_armed;
+    clear_followup();
     drain_rb(s_tx_rb);
     drain_rb(s_rx_rb);
     s_deadline_us = esp_timer_get_time() + (int64_t)CONFIG_AUDIO_WS_MAX_MS * 1000LL;
@@ -238,6 +317,17 @@ static void begin_uplink(void)
     s_uplink = true;
     s_play_primed = false;
     s_rx_bytes_total = 0;
+    /* 续听/唤醒开上行后若迟迟无有效语音，用 FOLLOWUP 窗口避免空挂 ASR */
+    if (CONFIG_AUDIO_WS_FOLLOWUP_MS > 0 && !s_speech_preheard) {
+        s_uplink_expect_speech = true;
+        s_nospeech_deadline_us =
+            esp_timer_get_time() + (int64_t)CONFIG_AUDIO_WS_FOLLOWUP_MS * 1000LL;
+    } else {
+        s_uplink_expect_speech = false;
+        s_nospeech_deadline_us = 0;
+    }
+    s_speech_preheard = false;
+    (void)from_followup;
     voice_listen();
     send_text_op("{\"op\":\"uplink_start\",\"rate\":16000,\"format\":\"s16le\",\"channels\":1}");
     ESP_LOGI(TAG, "uplink started");
@@ -527,6 +617,8 @@ static void do_session_start(void)
         s_await_downlink = false;
         s_drain_then_close = false;
         s_cooldown_until_us = 0;
+        clear_followup();
+        s_uplink_expect_speech = false;
         drain_rb(s_tx_rb);
         drain_rb(s_rx_rb);
         destroy_client();
@@ -697,6 +789,10 @@ static void worker_task(void *arg)
                 do_play_start(msg.reason);
             } else if (msg.cmd == WS_CMD_LISTEN_STOP) {
                 do_listen_stop(msg.reason);
+            } else if (msg.cmd == WS_CMD_DIALOG_IDLE) {
+                do_dialog_idle();
+            } else if (msg.cmd == WS_CMD_FOLLOWUP_ABORT) {
+                do_followup_nospeech_abort();
             } else if (msg.cmd == WS_CMD_SESSION_STOP) {
                 do_session_stop(msg.reason[0] ? msg.reason : "manual");
             } else if (msg.cmd == WS_CMD_CLOSE) {
@@ -748,10 +844,23 @@ static void worker_task(void *arg)
                 s_await_downlink = false;
                 s_play_primed = false;
                 (void)ns4168_amp_set_enabled(false);
-                voice_idle();
                 /* 故意不 destroy：避免二次建连任务失败 / 下行被 RST 掐断 */
+                arm_followup_or_idle();
                 continue;
             }
+        }
+
+        if (s_followup_armed && !s_uplink && !s_playing && !s_await_downlink &&
+            !s_drain_then_close && esp_timer_get_time() >= s_followup_deadline_us) {
+            ESP_LOGI(TAG, "followup timeout");
+            do_dialog_idle();
+            continue;
+        }
+
+        if (s_uplink && s_uplink_expect_speech && s_nospeech_deadline_us > 0 &&
+            esp_timer_get_time() >= s_nospeech_deadline_us) {
+            do_followup_nospeech_abort();
+            continue;
         }
 
         if (s_await_downlink && !s_uplink && s_connected && !s_drain_then_close && !s_playing &&
@@ -761,8 +870,7 @@ static void worker_task(void *arg)
             s_playing = false;
             s_await_downlink = false;
             s_drain_then_close = false;
-            voice_idle();
-            /* 仅网关长时间无活动时放行；inhibit 在 begin_uplink 清 */
+            do_dialog_idle();
             continue;
         }
 
@@ -899,10 +1007,10 @@ esp_err_t audio_ws_client_init(void)
     }
 
     s_inited = true;
-    ESP_LOGI(TAG, "init OK sink=%d uri=%s eos=%dms max=%dms dl_wait=%dms",
+    ESP_LOGI(TAG, "init OK sink=%d uri=%s eos=%dms max=%dms dl_wait=%dms followup=%dms",
              s_sink_id, CONFIG_AUDIO_WS_URI,
              CONFIG_AUDIO_WS_EOS_MS, CONFIG_AUDIO_WS_MAX_MS,
-             CONFIG_AUDIO_WS_DOWNLINK_WAIT_MS);
+             CONFIG_AUDIO_WS_DOWNLINK_WAIT_MS, CONFIG_AUDIO_WS_FOLLOWUP_MS);
     return ESP_OK;
 }
 
@@ -985,7 +1093,33 @@ bool audio_ws_client_is_busy(void)
     if (s_client == NULL || !esp_websocket_client_is_connected(s_client)) {
         return s_uplink || s_start_pending;
     }
+    /* followup armed 不算 busy：允许唤醒或 VAD 直接开上行 */
     return s_uplink || s_playing || s_await_downlink || s_start_pending || s_drain_then_close;
+}
+
+bool audio_ws_client_is_followup_armed(void)
+{
+    return s_followup_armed && CONFIG_AUDIO_WS_FOLLOWUP_MS > 0;
+}
+
+esp_err_t audio_ws_client_followup_begin(void)
+{
+    return audio_ws_client_session_start();
+}
+
+void audio_ws_client_followup_nospeech_abort(void)
+{
+    if (!s_uplink || !s_uplink_expect_speech) {
+        return;
+    }
+    post_cmd(WS_CMD_FOLLOWUP_ABORT, "manual");
+}
+
+void audio_ws_client_notify_speech_heard(void)
+{
+    s_uplink_expect_speech = false;
+    s_nospeech_deadline_us = 0;
+    s_speech_preheard = true;
 }
 
 void audio_ws_client_on_pcm(const int16_t *pcm, size_t n_samples, void *ctx)
@@ -1038,6 +1172,20 @@ bool audio_ws_client_is_busy(void)
 {
     return false;
 }
+
+bool audio_ws_client_is_followup_armed(void)
+{
+    return false;
+}
+
+esp_err_t audio_ws_client_followup_begin(void)
+{
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+void audio_ws_client_followup_nospeech_abort(void) {}
+
+void audio_ws_client_notify_speech_heard(void) {}
 
 void audio_ws_client_on_pcm(const int16_t *pcm, size_t n_samples, void *ctx)
 {

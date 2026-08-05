@@ -26,17 +26,29 @@
 
 - 停说：AFE VAD 连续静音 ≥ `CONFIG_AUDIO_WS_EOS_MS`（默认 1000ms）→ `reason=vad`
 - 兜底：单次上行最长 `CONFIG_AUDIO_WS_MAX_MS`（默认 15s）→ `reason=max`
-- **`uplink_stop` 后保持连接**，等待下行 TTS；`play_stop` 播完后**仍保持连接**，下一轮直接 `uplink_start`
+- **`uplink_stop` 后保持连接**，等待下行 TTS；`play_stop` 播完后**仍保持连接**
 - **禁止每轮 destroy/重连**（避免下行 RST 截断、二次建任务失败）
-- **禁止自动重连**；上行/等下行期间忽略再次唤醒，避免反复开 ASR 被限流
+- **禁止自动重连**；上行/等下行/播放期间忽略再次唤醒，避免反复开 ASR 被限流
 - VAD：须先检测到语音，再累计静音才 `uplink_stop`
+
+## 续听窗口与多轮上下文
+
+- `CONFIG_AUDIO_WS_FOLLOWUP_MS`（默认 8000；`0` = 关闭）
+- TTS 排空后：
+  - `FOLLOWUP_MS > 0`：进入续听窗口（LED 听状态）。窗口内 AFE 检测到语音或再次唤醒 → 直接 `uplink_start`，**无需唤醒词**。
+  - 窗口超时仍无语音 → 发 `{"op":"dialog_idle"}`，回到需唤醒；网关丢弃爱马仕 `X-Hermes-Session-Id`。
+  - `FOLLOWUP_MS == 0`：播完立即 `dialog_idle`（每轮需唤醒；无跨轮会话）。
+- 续听窗口**不算 busy**；播放/等待下行仍算 busy（本阶段无 barge-in）。
+- 开上行后若长时间无有效语音，用 `FOLLOWUP_MS` 短超时 abort，避免空挂 ASR。
+
+网关侧：多轮上下文由爱马仕 SessionDB 维护（请求头 `X-Hermes-Session-Id`）；bridge 只保存 session id，不本地拼 `messages`。`dialog_idle` / 断线时清空 id；漏发时有 `DIALOG_IDLE_FALLBACK_S` 兜底。
 
 ## 下行（网关 → 设备播放）
 
 - Binary 帧：同上 PCM → `ns4168_amp_write`
 - 控制：`{"op":"play_start"}` / `{"op":"play_stop"}`
 - 播放期间不因唤醒重开上行
-- 网关应在 TTS 播完后发 `play_stop`，否则设备按下行等待超时断开
+- 网关应在 TTS 播完后发 `play_stop`，否则设备按下行等待超时处理
 
 ## 与事件总线的关系
 
@@ -56,5 +68,6 @@ menuconfig → 音频算法 → **WebSocket PCM 客户端**：
 | `AUDIO_WS_EOS_MS` | VAD 静音判停说 |
 | `AUDIO_WS_MAX_MS` | 单次上行上限 |
 | `AUDIO_WS_DOWNLINK_WAIT_MS` | 下行**静默看门狗**：无 `processing`/`play`/`PCM` 超过此时长才放弃等待；网关处理中会心跳续命 |
+| `AUDIO_WS_FOLLOWUP_MS` | 播完后续听窗口；`0` 关闭自动续听 |
 
 UDP 路径（`AUDIO_STREAM_ENABLE`）仍保留作回退。

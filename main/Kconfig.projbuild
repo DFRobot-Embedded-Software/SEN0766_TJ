@@ -565,6 +565,16 @@ menu "3. 音频算法 (YAMNet / 唤醒 / 透传)"
                 若超过该时间收不到 processing / reply / play_* / PCM，才放弃等待。
                 网关在 Hermes/TTS 准备期间应周期性发 processing 续命，
                 因此后端再慢也不会因固定超时误放行再次上行。
+
+        config AUDIO_WS_FOLLOWUP_MS
+            int "播完后续听窗口 (ms，0=关闭)"
+            depends on AUDIO_WS_ENABLE
+            default 8000
+            range 0 60000
+            help
+                TTS 排空后进入续听窗口：窗口内检测到语音可直接上行，无需再唤醒。
+                超时未说话则发 dialog_idle、清空网关上下文，之后需再次唤醒。
+                设为 0 时与旧行为一致（每轮需唤醒；播完即结束对话上下文）。
     endmenu
 
 endmenu
