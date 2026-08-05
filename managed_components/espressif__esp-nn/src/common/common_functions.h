@@ -257,6 +257,40 @@ static void esp_nn_aligned_s8_pad_with_value(const int8_t *src, int8_t *dst,
     }
 }
 
+/*
+ * Pad with independent amounts on all four sides. TFLite passes only the
+ * leading (top/left) "SAME" padding; when the total padding for a dimension
+ * is odd, the extra trailing (bottom/right) padding is implicit and may
+ * exceed the leading one, so a symmetric pad is not sufficient.
+ */
+static void esp_nn_aligned_s8_pad_asymmetric(const int8_t *src, int8_t *dst,
+                                             const uint16_t input_wd,
+                                             const uint16_t input_ht,
+                                             const uint16_t channels,
+                                             const int32_t pad_val,
+                                             const uint16_t pad_left,
+                                             const uint16_t pad_top,
+                                             const uint16_t pad_right,
+                                             const uint16_t pad_bottom)
+{
+    const int32_t padded_row = (pad_left + input_wd + pad_right) * channels;
+
+    memset(dst, pad_val, padded_row * pad_top);
+    dst += padded_row * pad_top;
+
+    for (int i = 0; i < input_ht; i++) {
+        memset(dst, pad_val, pad_left * channels);
+        dst += pad_left * channels;
+        memcpy(dst, src, input_wd * channels);
+        dst += input_wd * channels;
+        src += input_wd * channels;
+        memset(dst, pad_val, pad_right * channels);
+        dst += pad_right * channels;
+    }
+
+    memset(dst, pad_val, padded_row * pad_bottom);
+}
+
 static void esp_nn_aligned_s8_pad_end_with_value(const int8_t *src, int8_t *dst,
                                                  const uint16_t input_wd,
                                                  const uint16_t input_ht,

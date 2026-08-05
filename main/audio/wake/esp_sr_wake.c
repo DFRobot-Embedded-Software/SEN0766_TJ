@@ -19,11 +19,19 @@
 #include "esp_heap_caps.h"
 #include "model_path.h"
 
+#if CONFIG_ESP_SR_WAKE_START_STREAM && CONFIG_AUDIO_WS_ENABLE
+#include "audio_ws_client.h"
+#endif
 #if CONFIG_ESP_SR_WAKE_START_STREAM && CONFIG_AUDIO_STREAM_ENABLE
 #include "audio_stream.h"
 #endif
 
 static const char *TAG = "esp_sr_wake";
+
+#if CONFIG_ESP_SR_WAKE_START_STREAM && CONFIG_AUDIO_WS_ENABLE
+static int64_t s_vad_silence_us;
+static bool s_vad_heard_speech;
+#endif
 
 /* 约 1s 的 mono PCM，供 AFE feed 追赶 */
 #define WAKE_PCM_RB_BYTES (AUDIO_CAPTURE_SAMPLE_RATE * sizeof(int16_t))
@@ -118,7 +126,7 @@ static void feed_task(void *arg)
     vTaskDelete(NULL);
 }
 
-/** 拉取 AFE 结果；检测到唤醒词则可选启动透传。 */
+/** 拉取 AFE 结果；检测到唤醒词则可选启动透传；上行中用 VAD 判停说。 */
 static void fetch_task(void *arg)
 {
     (void)arg;
@@ -136,13 +144,57 @@ static void fetch_task(void *arg)
             if (s_wake_cb) {
                 s_wake_cb(s_wake_cb_ctx);
             }
-#if CONFIG_ESP_SR_WAKE_START_STREAM && CONFIG_AUDIO_STREAM_ENABLE
+#if CONFIG_ESP_SR_WAKE_START_STREAM
+#if CONFIG_AUDIO_WS_ENABLE
+            /* 会话进行中（上行/等 TTS/播放）禁止重连，避免打爆 ASR */
+            if (!audio_ws_client_is_busy()) {
+                s_vad_silence_us = 0;
+                s_vad_heard_speech = false;
+                esp_err_t err = audio_ws_client_session_start();
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "audio_ws_client_session_start: %s", esp_err_to_name(err));
+                }
+            } else {
+                ESP_LOGI(TAG, "wake ignored — WS session busy");
+            }
+#elif CONFIG_AUDIO_STREAM_ENABLE
             esp_err_t err = audio_stream_start();
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "audio_stream_start: %s", esp_err_to_name(err));
             }
 #endif
+#endif
         }
+
+#if CONFIG_ESP_SR_WAKE_START_STREAM && CONFIG_AUDIO_WS_ENABLE
+        if (audio_ws_client_is_uplink_active() && !audio_ws_client_is_playing()) {
+            if (res->vad_state == VAD_SPEECH) {
+                s_vad_heard_speech = true;
+                s_vad_silence_us = 0;
+            } else if (res->vad_state == VAD_SILENCE) {
+                /* 必须先出现过语音，再累计静音 — 避免唤醒后未说话就 EOS */
+                if (!s_vad_heard_speech) {
+                    s_vad_silence_us = 0;
+                } else {
+                    int samples = res->data_size > 0 ? (res->data_size / (int)sizeof(int16_t)) : 0;
+                    if (samples > 0) {
+                        s_vad_silence_us +=
+                            (int64_t)samples * 1000000LL / (int64_t)AUDIO_CAPTURE_SAMPLE_RATE;
+                    } else {
+                        s_vad_silence_us += 200000;
+                    }
+                    if (s_vad_silence_us >= (int64_t)CONFIG_AUDIO_WS_EOS_MS * 1000LL) {
+                        ESP_LOGI(TAG, "VAD EOS (silence >= %d ms)", CONFIG_AUDIO_WS_EOS_MS);
+                        audio_ws_client_notify_eos();
+                        s_vad_silence_us = 0;
+                        s_vad_heard_speech = false;
+                    }
+                }
+            }
+        } else if (!audio_ws_client_is_uplink_active()) {
+            s_vad_silence_us = 0;
+        }
+#endif
     }
 
     s_fetch_task = NULL;
@@ -191,7 +243,12 @@ esp_err_t esp_sr_wake_start(void)
         return ESP_FAIL;
     }
 
-    s_pcm_rb = xRingbufferCreate(WAKE_PCM_RB_BYTES, RINGBUF_TYPE_BYTEBUF);
+    s_pcm_rb = xRingbufferCreateWithCaps(WAKE_PCM_RB_BYTES, RINGBUF_TYPE_BYTEBUF,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_pcm_rb == NULL) {
+        s_pcm_rb = xRingbufferCreateWithCaps(WAKE_PCM_RB_BYTES, RINGBUF_TYPE_BYTEBUF,
+                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
     if (s_pcm_rb == NULL) {
         s_afe_handle->destroy(s_afe_data);
         s_afe_data = NULL;
@@ -204,7 +261,7 @@ esp_err_t esp_sr_wake_start(void)
 
     esp_err_t err = audio_capture_acquire();
     if (err != ESP_OK) {
-        vRingbufferDelete(s_pcm_rb);
+        vRingbufferDeleteWithCaps(s_pcm_rb);
         s_pcm_rb = NULL;
         s_afe_handle->destroy(s_afe_data);
         s_afe_data = NULL;
@@ -218,7 +275,7 @@ esp_err_t esp_sr_wake_start(void)
     err = audio_capture_add_sink(on_capture_pcm, NULL, &s_sink_id);
     if (err != ESP_OK) {
         audio_capture_release();
-        vRingbufferDelete(s_pcm_rb);
+        vRingbufferDeleteWithCaps(s_pcm_rb);
         s_pcm_rb = NULL;
         s_afe_handle->destroy(s_afe_data);
         s_afe_data = NULL;
@@ -273,7 +330,7 @@ void esp_sr_wake_stop(void)
     }
 
     if (s_pcm_rb != NULL) {
-        vRingbufferDelete(s_pcm_rb);
+        vRingbufferDeleteWithCaps(s_pcm_rb);
         s_pcm_rb = NULL;
     }
 

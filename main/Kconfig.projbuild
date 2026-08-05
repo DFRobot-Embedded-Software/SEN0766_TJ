@@ -368,6 +368,15 @@ menu "2. 音频硬件 (ES7210 / NS4168)"
             depends on NS4168_ENABLE
             default 16000
             range 8000 48000
+
+        config NS4168_PLAYBACK_GAIN
+            int "播放数字增益倍数"
+            depends on NS4168_ENABLE
+            default 3
+            range 1 8
+            help
+                CosyVoice 等 TTS PCM 往往偏小；对下行 int16 做饱和放大。
+                1=原样，3≈+9.5dB。过大易削波失真。
     endmenu
 
     config AUDIO_CAPTURE_DIGITAL_GAIN
@@ -477,9 +486,11 @@ menu "3. 音频算法 (YAMNet / 唤醒 / 透传)"
                 另在 Component config → ESP Speech Recognition 勾选 WakeNet。
 
         config ESP_SR_WAKE_START_STREAM
-            bool "唤醒后自动 UDP 透传"
-            depends on ESP_SR_WAKE_ENABLE && AUDIO_STREAM_ENABLE
+            bool "唤醒后自动开始音频透传"
+            depends on ESP_SR_WAKE_ENABLE && (AUDIO_STREAM_ENABLE || AUDIO_WS_ENABLE)
             default y
+            help
+                优先 WebSocket 客户端会话；未启用 AUDIO_WS 时回退 UDP。
 
         config ESP_SR_WAKE_FETCH_CORE
             int "AFE fetch 绑核 (-1=不绑)"
@@ -510,6 +521,50 @@ menu "3. 音频算法 (YAMNet / 唤醒 / 透传)"
             depends on AUDIO_STREAM_ENABLE
             default 15000
             range 1000 120000
+    endmenu
+
+    menu "WebSocket PCM 客户端（连网关）"
+        config AUDIO_WS_ENABLE
+            bool "启用"
+            depends on YAMNET_ENABLE
+            default n
+            help
+                设备作为 WebSocket 客户端连接网关，上行麦克风、下行播放。
+
+        config AUDIO_WS_URI
+            string "网关 URI"
+            depends on AUDIO_WS_ENABLE
+            default "ws://192.168.1.100:8080/ws/audio"
+
+        config AUDIO_WS_AUTH_HEADER
+            string "可选 Authorization 头完整行（空=不鉴权）"
+            depends on AUDIO_WS_ENABLE
+            default ""
+            help
+                例如 Authorization: Bearer <token>（勿含末尾 CRLF，固件会补）
+
+        config AUDIO_WS_EOS_MS
+            int "停说判定：连续静音 (ms)"
+            depends on AUDIO_WS_ENABLE
+            default 1000
+            range 300 10000
+
+        config AUDIO_WS_MAX_MS
+            int "单次上行最长时长 (ms)"
+            depends on AUDIO_WS_ENABLE
+            default 15000
+            range 1000 120000
+
+        config AUDIO_WS_DOWNLINK_WAIT_MS
+            int "下行静默看门狗 (ms)"
+            depends on AUDIO_WS_ENABLE
+            default 45000
+            range 3000 300000
+            help
+                listen_stop 后进入等待下行。本值不是「整轮最长耗时」，而是：
+                若超过该时间收不到 processing / reply / play_* / PCM，才放弃等待。
+                网关在 Hermes/TTS 准备期间应周期性发 processing 续命，
+                因此后端再慢也不会因固定超时误放行再次上行。
     endmenu
 
 endmenu

@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
 #include "freertos/task.h"
@@ -140,14 +141,19 @@ esp_err_t audio_stream_init(void)
         return ESP_OK;
     }
 
-    s_tx_rb = xRingbufferCreate(STREAM_RB_BYTES, RINGBUF_TYPE_BYTEBUF);
+    s_tx_rb = xRingbufferCreateWithCaps(STREAM_RB_BYTES, RINGBUF_TYPE_BYTEBUF,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_tx_rb == NULL) {
+        s_tx_rb = xRingbufferCreateWithCaps(STREAM_RB_BYTES, RINGBUF_TYPE_BYTEBUF,
+                                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
     if (s_tx_rb == NULL) {
         return ESP_ERR_NO_MEM;
     }
 
     esp_err_t err = audio_capture_acquire();
     if (err != ESP_OK) {
-        vRingbufferDelete(s_tx_rb);
+        vRingbufferDeleteWithCaps(s_tx_rb);
         s_tx_rb = NULL;
         return err;
     }
@@ -155,7 +161,7 @@ esp_err_t audio_stream_init(void)
     err = audio_capture_add_sink(audio_stream_on_pcm, NULL, &s_sink_id);
     if (err != ESP_OK) {
         audio_capture_release();
-        vRingbufferDelete(s_tx_rb);
+        vRingbufferDeleteWithCaps(s_tx_rb);
         s_tx_rb = NULL;
         return err;
     }
@@ -166,7 +172,7 @@ esp_err_t audio_stream_init(void)
         audio_capture_remove_sink(s_sink_id);
         s_sink_id = -1;
         audio_capture_release();
-        vRingbufferDelete(s_tx_rb);
+        vRingbufferDeleteWithCaps(s_tx_rb);
         s_tx_rb = NULL;
         return ESP_ERR_NO_MEM;
     }
@@ -199,7 +205,7 @@ void audio_stream_deinit(void)
     audio_capture_release();
 
     if (s_tx_rb != NULL) {
-        vRingbufferDelete(s_tx_rb);
+        vRingbufferDeleteWithCaps(s_tx_rb);
         s_tx_rb = NULL;
     }
 }

@@ -107,12 +107,13 @@ if(CONFIG_PARTITION_TABLE_CUSTOM)
     if("${size}" AND "${offset}")
         set(MVMODEL_EXE ${COMPONENT_PATH}/model/movemodel.py)
         idf_build_get_property(build_dir BUILD_DIR)
+        idf_build_get_property(python PYTHON)
         set(image_file ${build_dir}/srmodels/srmodels.bin)
 
         add_custom_command(
             OUTPUT ${image_file}
             COMMENT "Move and Pack models..."
-            COMMAND python ${MVMODEL_EXE} -d1 ${SDKCONFIG} -d2 ${COMPONENT_PATH} -d3 ${build_dir}
+            COMMAND ${python} ${MVMODEL_EXE} -d1 ${SDKCONFIG} -d2 ${COMPONENT_PATH} -d3 ${build_dir}
             DEPENDS ${SDKCONFIG}
             VERBATIM)
 

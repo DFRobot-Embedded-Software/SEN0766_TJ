@@ -5,6 +5,7 @@
 #include "ns4168_amp.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "sdkconfig.h"
 
 #if CONFIG_NS4168_ENABLE
@@ -29,6 +30,9 @@ esp_err_t ns4168_amp_init(void)
     i2s_chan_config_t chan_cfg =
         I2S_CHANNEL_DEFAULT_CONFIG((i2s_port_t)CONFIG_NS4168_I2S_PORT, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true;
+    /* 加深 DMA，减少偶发 underrun 卡顿 */
+    chan_cfg.dma_desc_num = 8;
+    chan_cfg.dma_frame_num = 320;
 
     esp_err_t err = i2s_new_channel(&chan_cfg, &s_i2s_tx, NULL);
     if (err != ESP_OK) {
@@ -38,6 +42,7 @@ esp_err_t ns4168_amp_init(void)
 
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(CONFIG_NS4168_SAMPLE_RATE),
+        /* 单声道直写网关 PCM；BOTH 让 L/R 都能接到 NS4168 CTRL 选路 */
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
                                                         I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
@@ -53,7 +58,7 @@ esp_err_t ns4168_amp_init(void)
             },
         },
     };
-    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
 
     err = i2s_channel_init_std_mode(s_i2s_tx, &std_cfg);
     if (err != ESP_OK) {
@@ -74,12 +79,13 @@ esp_err_t ns4168_amp_init(void)
     s_ready = true;
     s_enabled = true;
     ESP_LOGI(TAG,
-             "NS4168 ready @ %d Hz I2S%u BCLK=%d WS=%d DOUT=%d",
+             "NS4168 ready @ %d Hz I2S%u BCLK=%d WS=%d DOUT=%d gain=%dx",
              CONFIG_NS4168_SAMPLE_RATE,
              (unsigned)CONFIG_NS4168_I2S_PORT,
              CONFIG_NS4168_I2S_BCLK,
              CONFIG_NS4168_I2S_WS,
-             CONFIG_NS4168_I2S_DOUT);
+             CONFIG_NS4168_I2S_DOUT,
+             CONFIG_NS4168_PLAYBACK_GAIN);
     return ESP_OK;
 }
 
@@ -131,16 +137,70 @@ esp_err_t ns4168_amp_write(const int16_t *pcm, size_t n_samples)
     }
 
     size_t bytes = n_samples * sizeof(int16_t);
-    size_t written = 0;
-    esp_err_t err = i2s_channel_write(s_i2s_tx, pcm, bytes, &written, pdMS_TO_TICKS(1000));
-    if (err != ESP_OK) {
-        return err;
-    }
-    if (written != bytes) {
-        ESP_LOGW(TAG, "short write %u/%u", (unsigned)written, (unsigned)bytes);
-        return ESP_ERR_TIMEOUT;
+#if CONFIG_NS4168_PLAYBACK_GAIN > 1
+    enum { GAIN_CHUNK = 512 };
+    int16_t tmp[GAIN_CHUNK];
+    size_t done = 0;
+    while (done < n_samples) {
+        size_t n = n_samples - done;
+        if (n > GAIN_CHUNK) {
+            n = GAIN_CHUNK;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            int32_t v = (int32_t)pcm[done + i] * (int32_t)CONFIG_NS4168_PLAYBACK_GAIN;
+            if (v > 32767) {
+                v = 32767;
+            } else if (v < -32768) {
+                v = -32768;
+            }
+            tmp[i] = (int16_t)v;
+        }
+        size_t off = 0;
+        const size_t need = n * sizeof(int16_t);
+        int64_t t0 = esp_timer_get_time();
+        while (off < need) {
+            size_t written = 0;
+            /* DMA 满时阻塞到腾位；繁忙时短超时易误杀丢帧 → 卡顿 */
+            esp_err_t err = i2s_channel_write(s_i2s_tx, (const uint8_t *)tmp + off, need - off,
+                                              &written, pdMS_TO_TICKS(500));
+            if (written > 0) {
+                off += written;
+                t0 = esp_timer_get_time();
+                continue;
+            }
+            if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
+                return err;
+            }
+            if ((esp_timer_get_time() - t0) > 3000000LL) {
+                ESP_LOGW(TAG, "amp_write stalled >3s");
+                return ESP_ERR_TIMEOUT;
+            }
+        }
+        done += n;
     }
     return ESP_OK;
+#else
+    size_t off = 0;
+    int64_t t0 = esp_timer_get_time();
+    while (off < bytes) {
+        size_t written = 0;
+        esp_err_t err = i2s_channel_write(s_i2s_tx, (const uint8_t *)pcm + off, bytes - off,
+                                          &written, pdMS_TO_TICKS(500));
+        if (written > 0) {
+            off += written;
+            t0 = esp_timer_get_time();
+            continue;
+        }
+        if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
+            return err;
+        }
+        if ((esp_timer_get_time() - t0) > 3000000LL) {
+            ESP_LOGW(TAG, "amp_write stalled >3s");
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+    return ESP_OK;
+#endif
 }
 
 #else /* !CONFIG_NS4168_ENABLE */

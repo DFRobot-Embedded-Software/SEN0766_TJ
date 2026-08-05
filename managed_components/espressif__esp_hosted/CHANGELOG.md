@@ -1,6 +1,12 @@
 # Unreleased - Main Branch
 
+
 # Releases
+
+# $${\color{green} \text{2.12.12}}$$
+
+- fixed sdio incorrect identification of all-ones bus read
+- removed memory leaks caused by mempool
 
 # $${\color{green} \text{2.12.11}}$$
 

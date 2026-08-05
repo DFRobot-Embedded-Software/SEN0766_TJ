@@ -54,7 +54,7 @@ dependencies:
       type: service
     version: 1.8.0
   espressif/esp-nn:
-    component_hash: ae8501c099ab2ae1527a23c6170e0c0cb3d914df3293710e033809c79b20f22f
+    component_hash: d341d40c8a135158f2bd47bd3c956bb8eda43358cd555cd887b410310a14c547
     dependencies:
     - name: idf
       require: private
@@ -62,7 +62,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 1.2.4
+    version: 1.2.5
   espressif/esp-sr:
     component_hash: 809d0041cdddd98a278f0d5afef7bb60a451290577b98cf718dfffc91bdcbd9b
     dependencies:
@@ -110,7 +110,7 @@ dependencies:
       type: service
     version: 1.6.1
   espressif/esp_hosted:
-    component_hash: f970ce453bcd6e779e067de04488aa6212295f4a607f041d038844c8cf8edea3
+    component_hash: 8ca10092db3e8c8122540d907ab705805a269377d31192f087ba1def2f5f4f91
     dependencies:
     - name: idf
       require: private
@@ -118,7 +118,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 2.12.11
+    version: 2.12.12
   espressif/esp_serial_slave_link:
     component_hash: ac1776806de0a6e371c84e87898bb983e19ce62aa7f1e2e5c4a3b0234a575d2c
     dependencies:
@@ -129,6 +129,16 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 1.1.2
+  espressif/esp_websocket_client:
+    component_hash: dc00233af846f3a744ada283a300e0d586040aadc3ee67361645ecdce4523672
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.8.0
   espressif/esp_wifi_remote:
     component_hash: caa856dac9d28afacafbaefdaaef3fffdf3f9149c6011ba36ac680a13f5fc19f
     dependencies:
@@ -211,11 +221,12 @@ direct_dependencies:
 - espressif/esp-tflite-micro
 - espressif/esp_codec_dev
 - espressif/esp_hosted
+- espressif/esp_websocket_client
 - espressif/esp_wifi_remote
 - espressif/led_strip
 - espressif/mcp-c-sdk
 - espressif/mdns
 - idf
-manifest_hash: f3194441acdfd8b6a2f5a64980b3bf6c07a5223fd353534b9d7a8975c2c00e48
+manifest_hash: 439135ee46cc8e1e465781f067c485c48c0aa8fdb8a3edce633ef6e6fb07e9d1
 target: esp32p4
 version: 2.0.0

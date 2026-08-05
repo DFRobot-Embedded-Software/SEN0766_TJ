@@ -360,12 +360,16 @@ void esp_nn_conv_s8_test()
     uint16_t pad_wd, pad_ht, stride_wd, stride_ht;
 
     printf("\n######## Running %s ##########\n", __FUNCTION__);
-    for (int itr = 0; itr < 18; itr++) {
+    for (int itr = 0; itr < 22; itr++) {
         /* Reset quant params to defaults each iteration */
         input_offset = 5;
         out_offset = 3;
         activation_min = -125;
         activation_max = 122;
+        /* Explicit output dims (0 = derive from pad/stride below). Needed for
+         * TFLite-style asymmetric "SAME" padding where only the leading
+         * (top/left) padding is passed in and trailing padding is implicit. */
+        uint16_t force_out_wd = 0, force_out_ht = 0;
 
         switch (itr) {
         case 0: // ch % 8 == 0 && filter (1,1), padding (0,0)
@@ -560,6 +564,59 @@ void esp_nn_conv_s8_test()
             activation_min = -128;
             activation_max = 127;
             break;
+        case 18: // asymmetric "SAME" padding as TFLite generates it (5x5, stride 2)
+            in_wd = 8;
+            in_ht = 8;
+            in_channels = 16;
+            out_channels = 16;
+            filter_ht = 5;
+            filter_wd = 5;
+            pad_wd = 1;
+            pad_ht = 1;
+            stride_wd = 2;
+            stride_ht = 2;
+            break;
+        case 20: // "SAME" padding with zero leading pad, trailing pad implicit (3x3, stride 2)
+            in_wd = 8;
+            in_ht = 8;
+            in_channels = 16;
+            out_channels = 16;
+            filter_ht = 3;
+            filter_wd = 3;
+            pad_wd = 0;
+            pad_ht = 0;
+            stride_wd = 2;
+            stride_ht = 2;
+            force_out_wd = 4; /* SAME: ceil(8/2) */
+            force_out_ht = 4;
+            break;
+        case 21: // 2x2 "SAME" conv: last row/column fall in implicit trailing pad
+            in_wd = 8;
+            in_ht = 8;
+            in_channels = 16;
+            out_channels = 16;
+            filter_ht = 2;
+            filter_wd = 2;
+            pad_wd = 0;
+            pad_ht = 0;
+            stride_wd = 1;
+            stride_ht = 1;
+            force_out_wd = 8; /* SAME: same size as input */
+            force_out_ht = 8;
+            break;
+        case 19: // asymmetric "SAME" padding as TFLite generates it (3x3, stride 2)
+            in_wd = 7;
+            in_ht = 8;
+            in_channels = 16;
+            out_channels = 16;
+            filter_ht = 3;
+            filter_wd = 3;
+            pad_wd = 1;
+            pad_ht = 0;
+            stride_wd = 2;
+            stride_ht = 2;
+            force_out_ht = 4; /* SAME: ceil(8/2); derived VALID value would be 3 */
+            break;
         default: // ch % 8 == 0
             in_wd = 8;
             in_ht = 8;
@@ -586,6 +643,12 @@ void esp_nn_conv_s8_test()
             out_ht = (in_ht + stride_ht - 1) / stride_ht;
         } else {
             out_ht = (in_ht + stride_ht - filter_ht) / stride_ht;
+        }
+        if (force_out_wd) {
+            out_wd = force_out_wd;
+        }
+        if (force_out_ht) {
+            out_ht = force_out_ht;
         }
 
         int in_size = in_wd * in_ht * in_channels;

@@ -15,6 +15,11 @@
 #include "yamnet_pcm_in.h"
 #include "yamnet_mel.h"
 #include "yamnet_events.h"
+
+#include "sdkconfig.h"
+#if CONFIG_AUDIO_WS_ENABLE
+#include "audio_ws_client.h"
+#endif
 #include "device_event_bus.h"
 #include "device_event_types.h"
 #include "cJSON.h"
@@ -467,6 +472,17 @@ static void infer_task(void *arg)
     run_startup_sanity_tests();
 
     while (s_running) {
+#if CONFIG_AUDIO_WS_ENABLE
+        /* TTS/上行忙时不做 TFLite：Invoke ~100ms+ 会饿死 I2S 写入 → amp_write TIMEOUT 卡顿 */
+        if (audio_ws_client_is_busy()) {
+            size_t pending = yamnet_pcm_in_bytes_pending();
+            if (pending > 0) {
+                yamnet_pcm_in_discard_bytes(pending);
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+#endif
         catch_up_audio_if_needed();
 
         size_t n = yamnet_pcm_in_read(pcm, sizeof(pcm) / sizeof(pcm[0]));

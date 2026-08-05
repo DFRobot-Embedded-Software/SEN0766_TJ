@@ -574,10 +574,13 @@ skip_asm_pad0:
         }
     }
 
-    // Calculate the last row if needed
+    // Calculate the last row if needed. Hand the remaining input rows to the
+    // generic kernel, which clamps filter windows to the input extent (the
+    // rows falling in the implicit trailing padding contribute zero).
     if (bottom_pad) {
-        int in_row = input_dims->height - filter_dims->height + 1;
-        esp_nn_conv_s8_opt(&(data_dims_t){input_dims->width, 2, input_dims->channels, 0},
+        int in_row = (out_ht - 1) * stride_ht;
+        esp_nn_conv_s8_opt(&(data_dims_t){input_dims->width, input_dims->height - in_row,
+                                          input_dims->channels, 0},
                             input_data + in_row * input_dims->width * input_dims->channels,
                             filter_dims, filter_data, bias,
                             &(data_dims_t){output_dims->width, 1, output_dims->channels, 0},

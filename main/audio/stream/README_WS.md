@@ -1,35 +1,60 @@
-# WebSocket 音频约定（未实现）
+# WebSocket 音频客户端（设备 → 网关）
 
-后续用 WebSocket 替换现行 UDP [`audio_stream`](audio_stream.h) 透传；**本阶段仅约定，固件未实现**。
+设备作为 **WebSocket 客户端** 连接网关 URI（`CONFIG_AUDIO_WS_URI`），唤醒后上行麦克风 PCM，接收下行 PCM 经 NS4168 播放。
 
-## 路径
+实现：[`audio_ws_client.c`](audio_ws_client.c)（`CONFIG_AUDIO_WS_ENABLE`）。
 
-- 建议：`ws://<device>/ws/audio`（与 Web Dashboard HTTP :80 同源；或独立端口，实现时再定）
+## 连接
 
-## 上行（设备 → 客户端，麦克风透传）
+- URI 示例：`ws://192.168.1.100:8080/ws/audio`
+- 可选鉴权：`CONFIG_AUDIO_WS_AUTH_HEADER`（完整头行，如 `Authorization: Bearer <token>`）
+
+## 上行（设备 → 网关，麦克风）
 
 - Binary 帧：16-bit LE PCM，16 kHz mono
-- 控制（JSON text 帧），开始前发送：
+- 开始（JSON text）：
 
 ```json
 {"op":"uplink_start","rate":16000,"format":"s16le","channels":1}
 ```
 
-- 停止：`{"op":"uplink_stop"}`
+- 结束：
 
-## 下行（客户端 → 设备播放）
+```json
+{"op":"uplink_stop","reason":"vad"|"max"|"error"|"manual"}
+```
 
-- Binary 帧：同上 PCM 格式
+- 停说：AFE VAD 连续静音 ≥ `CONFIG_AUDIO_WS_EOS_MS`（默认 1000ms）→ `reason=vad`
+- 兜底：单次上行最长 `CONFIG_AUDIO_WS_MAX_MS`（默认 15s）→ `reason=max`
+- **`uplink_stop` 后保持连接**，等待下行 TTS；`play_stop` 播完后**仍保持连接**，下一轮直接 `uplink_start`
+- **禁止每轮 destroy/重连**（避免下行 RST 截断、二次建任务失败）
+- **禁止自动重连**；上行/等下行期间忽略再次唤醒，避免反复开 ASR 被限流
+- VAD：须先检测到语音，再累计静音才 `uplink_stop`
+
+## 下行（网关 → 设备播放）
+
+- Binary 帧：同上 PCM → `ns4168_amp_write`
 - 控制：`{"op":"play_start"}` / `{"op":"play_stop"}`
+- 播放期间不因唤醒重开上行
+- 网关应在 TTS 播完后发 `play_stop`，否则设备按下行等待超时断开
 
 ## 与事件总线的关系
 
 - WebSocket **只传媒体**，不承载分类告警
 - YAMNet / 声级告警仍走 `device_event_emit(category=sound)` → `sensor://events` / `/api/events`
-- 唤醒后开始上行：由现有 wake 回调打开 WS session，而不是往事件总线塞 PCM
+- 唤醒后开始上行：`ESP_SR_WAKE_START_STREAM` 优先 WS；未开 `AUDIO_WS` 时回退 UDP `audio_stream`
 
-## 迁移
+## 配置
 
-1. 实现 `/ws/audio` 与上/下行会话
-2. 将 `esp_sr_wake` / 业务触发从 `audio_stream_start()` 切到 WS
-3. 保留 `CONFIG_AUDIO_STREAM_ENABLE` UDP 路径作回退，确认稳定后删除
+menuconfig → 音频算法 → **WebSocket PCM 客户端**：
+
+| 选项 | 说明 |
+|------|------|
+| `AUDIO_WS_ENABLE` | 启用客户端 |
+| `AUDIO_WS_URI` | 网关地址 |
+| `AUDIO_WS_AUTH_HEADER` | 可选 Authorization |
+| `AUDIO_WS_EOS_MS` | VAD 静音判停说 |
+| `AUDIO_WS_MAX_MS` | 单次上行上限 |
+| `AUDIO_WS_DOWNLINK_WAIT_MS` | 下行**静默看门狗**：无 `processing`/`play`/`PCM` 超过此时长才放弃等待；网关处理中会心跳续命 |
+
+UDP 路径（`AUDIO_STREAM_ENABLE`）仍保留作回退。

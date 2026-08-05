@@ -61,6 +61,11 @@ if(CONFIG_YAMNET_ENABLE)
     endif()
 endif()
 
+if(CONFIG_AUDIO_WS_ENABLE)
+    list(APPEND srcs "audio/stream/audio_ws_client.c")
+    list(APPEND audio_requires espressif__esp_websocket_client)
+endif()
+
 idf_component_register(
     SRCS ${srcs}
     INCLUDE_DIRS

@@ -25,6 +25,9 @@ static const char *TAG = "mcp_sensors";
 #if CONFIG_AUDIO_STREAM_ENABLE
 #include "audio_stream.h"
 #endif
+#if CONFIG_AUDIO_WS_ENABLE
+#include "audio_ws_client.h"
+#endif
 #if CONFIG_ESP_SR_WAKE_ENABLE
 #include "esp_sr_wake.h"
 #endif
@@ -187,6 +190,15 @@ static void boot_audio(void)
         ESP_LOGW(TAG, "audio_stream init failed: %s", esp_err_to_name(err));
     } else {
         ESP_LOGI(TAG, "audio_stream ready");
+    }
+#endif
+
+#if CONFIG_AUDIO_WS_ENABLE
+    err = audio_ws_client_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "audio_ws_client init failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "audio_ws_client ready");
     }
 #endif
 

@@ -360,10 +360,16 @@ int esp_nn_get_conv_scratch_size_esp32s3(const data_dims_t *input_dims,
         }
 
         new_channels = (in_ch + 15) & ~15;
-        if (pad_wd == 0 && pad_ht == 0) {
+
+        // Padded-input scratch: leading (top/left) padding from TFLite plus the
+        // trailing (bottom/right) padding derived from the output extent.
+        // Must match the padding applied in esp_nn_conv_s8_esp32s3().
+        int pad_right = max(0, (output_dims->width - 1) * stride_wd + filter_wd - pad_wd - input_wd);
+        int pad_bottom = max(0, (output_dims->height - 1) * stride_ht + filter_ht - pad_ht - input_ht);
+        if (pad_wd == 0 && pad_ht == 0 && pad_right == 0 && pad_bottom == 0) {
             input_scratch = 0;
         } else {
-            input_scratch = (input_wd + 2 * pad_wd) * (input_ht + 2 * pad_ht) * in_ch;
+            input_scratch = (input_wd + pad_wd + pad_right) * (input_ht + pad_ht + pad_bottom) * in_ch;
         }
         filter_scratch = filter_wd * filter_ht * new_channels * out_ch;
 
@@ -371,16 +377,8 @@ int esp_nn_get_conv_scratch_size_esp32s3(const data_dims_t *input_dims,
         int32_t aligned_filter_row_size = ((filter_row_size + 15) / 16) * 16;
         int filter_alignment_scratch = aligned_filter_row_size * filter_ht * out_ch;
 
-        // Account for right/bottom padding even when pad_wd=0, pad_ht=0
-        int pad_right = max(0, (output_dims->width * stride_wd + filter_wd - 1) - input_wd);
-        int pad_bottom = max(0, (output_dims->height * stride_ht + filter_ht - 1) - input_ht);
-        int boundary_padding_scratch = 0;
-        if (pad_right > 0 || pad_bottom > 0) {
-            boundary_padding_scratch = (input_wd + pad_right) * (input_ht + pad_bottom) * in_ch;
-        }
-
         int offset_acc_scratch = out_ch * 4;
-        return input_scratch + filter_scratch + filter_alignment_scratch + boundary_padding_scratch + align_buf_size + offset_acc_scratch;
+        return input_scratch + filter_scratch + filter_alignment_scratch + align_buf_size + offset_acc_scratch;
     }
     return align_buf_size;
 }
@@ -510,28 +508,20 @@ void esp_nn_conv_s8_esp32s3(const data_dims_t *input_dims,
             memcpy(filter_data_aligned, filter_data, filter_size);
             scratch_data += filter_size;
         }
-        // Calculate if right/bottom padding is needed even when pad_wd=0, pad_ht=0
-        // This happens when the filter extends beyond input boundaries at the edges
-        // Formula matches depthwise convolution: (out_wd * stride_wd + filter_wd - 1) - input_wd
-        int32_t pad_right = max(0, (out_wd * stride_wd + filter_wd - 1) - input_wd);
-        int32_t pad_bottom = max(0, (out_ht * stride_ht + filter_ht - 1) - input_ht);
+        // pad_wd/pad_ht carry only the leading (top/left) padding as passed by
+        // TFLite. Derive the trailing (bottom/right) padding from the output
+        // extent: it differs from the leading one whenever the total "SAME"
+        // padding is odd, and is also needed when pad_wd/pad_ht are 0.
+        int32_t pad_right = max(0, (out_wd - 1) * stride_wd + filter_wd - pad_wd - input_wd);
+        int32_t pad_bottom = max(0, (out_ht - 1) * stride_ht + filter_ht - pad_ht - input_ht);
 
-        // Apply padding if explicitly requested (pad_wd/pad_ht) OR if needed for boundary handling
-        if (pad_wd != 0 || pad_ht != 0) {
-            // Full padding (top, bottom, left, right) when pad_wd/pad_ht are set
+        if (pad_wd != 0 || pad_ht != 0 || pad_right > 0 || pad_bottom > 0) {
             input_padded = (int8_t *) scratch_data;
-            esp_nn_aligned_s8_pad_with_value(input, input_padded, input_wd, input_ht, channels,
-                                            -input_offset, pad_wd, pad_ht);
-            new_input_wd = input_wd + 2 * pad_wd;
-            new_input_ht = input_ht + 2 * pad_ht;
-            scratch_data += new_input_wd * new_input_ht * channels;
-        } else if (pad_right > 0 || pad_bottom > 0) {
-            // Only right/bottom padding needed for boundary handling (like depthwise conv)
-            input_padded = (int8_t *) scratch_data;
-            esp_nn_aligned_s8_pad_end_with_value(input, input_padded, input_wd, input_ht, channels,
-                                                -input_offset, (uint16_t)pad_right, (uint16_t)pad_bottom);
-            new_input_wd = input_wd + pad_right;
-            new_input_ht = input_ht + pad_bottom;
+            esp_nn_aligned_s8_pad_asymmetric(input, input_padded, input_wd, input_ht, channels,
+                                             -input_offset, pad_wd, pad_ht,
+                                             (uint16_t) pad_right, (uint16_t) pad_bottom);
+            new_input_wd = input_wd + pad_wd + pad_right;
+            new_input_ht = input_ht + pad_ht + pad_bottom;
             scratch_data += new_input_wd * new_input_ht * channels;
         }
 

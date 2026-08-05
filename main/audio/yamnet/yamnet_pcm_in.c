@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
 #include "freertos/task.h"
@@ -58,14 +59,19 @@ esp_err_t yamnet_pcm_in_start(void)
         return ESP_OK;
     }
 
-    s_pcm_rb = xRingbufferCreate(PCM_RING_BYTES, RINGBUF_TYPE_BYTEBUF);
+    s_pcm_rb = xRingbufferCreateWithCaps(PCM_RING_BYTES, RINGBUF_TYPE_BYTEBUF,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_pcm_rb == NULL) {
+        s_pcm_rb = xRingbufferCreateWithCaps(PCM_RING_BYTES, RINGBUF_TYPE_BYTEBUF,
+                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
     if (s_pcm_rb == NULL) {
         return ESP_ERR_NO_MEM;
     }
 
     esp_err_t err = audio_capture_acquire();
     if (err != ESP_OK) {
-        vRingbufferDelete(s_pcm_rb);
+        vRingbufferDeleteWithCaps(s_pcm_rb);
         s_pcm_rb = NULL;
         return err;
     }
@@ -73,7 +79,7 @@ esp_err_t yamnet_pcm_in_start(void)
     err = audio_capture_add_sink(on_capture_pcm, NULL, &s_sink_id);
     if (err != ESP_OK) {
         audio_capture_release();
-        vRingbufferDelete(s_pcm_rb);
+        vRingbufferDeleteWithCaps(s_pcm_rb);
         s_pcm_rb = NULL;
         return err;
     }
@@ -97,7 +103,7 @@ void yamnet_pcm_in_stop(void)
     audio_capture_release();
 
     if (s_pcm_rb != NULL) {
-        vRingbufferDelete(s_pcm_rb);
+        vRingbufferDeleteWithCaps(s_pcm_rb);
         s_pcm_rb = NULL;
     }
 }
