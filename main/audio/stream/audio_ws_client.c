@@ -85,6 +85,7 @@ static volatile bool s_drain_then_close;
 static volatile bool s_ws_dead; /* 连接已废，下一轮 session_start 再 destroy+重建 */
 static volatile bool s_play_primed; /* 已攒够预缓冲，开始真正写功放 */
 static volatile bool s_followup_armed; /* 播完后续听窗口（不算 busy） */
+static volatile bool s_skip_followup;  /* 网关 dialog_end：播完后不续听 */
 static volatile bool s_uplink_expect_speech; /* 本轮上行需先听到语音，否则短超时 abort */
 static volatile bool s_speech_preheard; /* begin_uplink 前已确认有语音（消异步竞态） */
 static int64_t s_deadline_us;
@@ -224,6 +225,7 @@ static void destroy_client(void)
     s_ws_dead = false;
     s_play_primed = false;
     s_followup_armed = false;
+    s_skip_followup = false;
     s_uplink_expect_speech = false;
     s_speech_preheard = false;
     s_followup_deadline_us = 0;
@@ -271,6 +273,12 @@ static void do_dialog_idle(void)
 static void arm_followup_or_idle(void)
 {
     s_tx_inhibit = false;
+    if (s_skip_followup) {
+        s_skip_followup = false;
+        ESP_LOGI(TAG, "dialog_end — skip followup");
+        do_dialog_idle();
+        return;
+    }
     if (CONFIG_AUDIO_WS_FOLLOWUP_MS > 0 && s_connected) {
         s_followup_armed = true;
         s_followup_deadline_us =
@@ -479,6 +487,13 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base, int32_t 
                     s_drain_then_close = true;
                     s_playing = true;
                     post_cmd(WS_CMD_CLOSE, NULL);
+                } else if (strcmp(op->valuestring, "dialog_end") == 0) {
+                    /* 用户口令退出：播完后不进入续听 */
+                    s_skip_followup = true;
+                    ESP_LOGI(TAG, "<< dialog_end — no followup after play");
+                    if (s_followup_armed && !s_playing && !s_drain_then_close && !s_uplink) {
+                        post_cmd(WS_CMD_DIALOG_IDLE, NULL);
+                    }
                 }
             }
             cJSON_Delete(root);

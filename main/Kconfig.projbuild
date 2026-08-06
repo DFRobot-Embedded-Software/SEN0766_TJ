@@ -630,7 +630,10 @@ menu "4. 设备事件"
 
     config EVENT_ENV_CONFIRM_MS
         int "环境阈值持续确认 (ms)"
-        default 60000
-        range 5000 600000
+        default 10000
+        range 2000 600000
+        help
+            读数持续超过阈值达到该时间后，才向事件总线发出环境告警。
+            网页「超限」角标为即时对比，不受此延迟影响。
 
 endmenu

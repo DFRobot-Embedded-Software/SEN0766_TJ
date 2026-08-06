@@ -84,11 +84,32 @@ PROCESSING_HEARTBEAT_S = float(os.environ.get("PROCESSING_HEARTBEAT_S", "5"))
 USE_STREAM_TTS = os.environ.get("USE_STREAM_TTS", "0") == "1"
 # 设备漏发 dialog_idle 时的兜底：丢弃爱马仕 session（秒）；略长于设备 FOLLOWUP_MS
 DIALOG_IDLE_FALLBACK_S = float(os.environ.get("DIALOG_IDLE_FALLBACK_S", "12"))
+# 可选口令快路径（逗号分隔，子串匹配）；自然语言退出仍交给爱马仕
+EXIT_PHRASES = tuple(
+    p.strip()
+    for p in os.environ.get(
+        "EXIT_PHRASES",
+        "退出,再见,拜拜,结束对话,不用了,没事了,告辞,闭嘴,退下,回见,先这样,回头聊,"
+        "bye,byebye,goodbye,goodnight",
+    ).split(",")
+    if p.strip()
+)
+EXIT_REPLY = os.environ.get("EXIT_REPLY", "好的，再见。")
+# 爱马仕判定退出时，回复第一行须为此标记（不播给用户）
+EXIT_MARKER = os.environ.get("EXIT_MARKER", "EXIT_DIALOG").strip() or "EXIT_DIALOG"
 
 HERMES_SYSTEM_PROMPT = (
     "你是语音助手。用户会询问传感器温湿度、CO2 等。"
     "优先使用可用工具/MCP 查询真实数据，用一两句中文简洁回答；"
     "查不到就如实说明，不要猜测数值。"
+    f"若用户想结束本次语音对话（告别、退下、先这样、bye 等，不限固定词），"
+    f"请在回复第一行单独写 {EXIT_MARKER}，从第二行起写一两句中文告别语；"
+    f"其他情况禁止输出 {EXIT_MARKER}。"
+)
+
+HERMES_EXIT_REMINDER = (
+    f"[规则]若用户是在结束对话/告别/让你退下，回复第一行必须只写 {EXIT_MARKER}，"
+    f"第二行起中文告别；否则正常回答且禁止出现 {EXIT_MARKER}。"
 )
 
 
@@ -124,23 +145,123 @@ def _json(op: str, **kwargs) -> str:
     return json.dumps({"op": op, **kwargs}, ensure_ascii=False)
 
 
+def _normalize_cmd(text: str) -> str:
+    t = (text or "").strip().lower()
+    for ch in "，。！？、,.!?;；：: \t\r\n\"'“”‘’":
+        t = t.replace(ch, "")
+    return t
+
+
+def is_exit_command(text: str) -> bool:
+    """口令/短句退出：子串匹配（覆盖「退下吧」「Bye bye」等）。"""
+    t = _normalize_cmd(text)
+    if not t:
+        return False
+    for phrase in EXIT_PHRASES:
+        p = _normalize_cmd(phrase)
+        if p and p in t:
+            return True
+    return False
+
+
+def looks_like_farewell_reply(reply: str) -> bool:
+    """爱马仕已在告别但漏写 EXIT_MARKER 时的兜底。"""
+    t = _normalize_cmd(reply)
+    if not t:
+        return False
+    cues = (
+        "再见",
+        "拜拜",
+        "下次再",
+        "随时找我",
+        "有需要再",
+        "有需要随时",
+        "告辞",
+        "byebye",
+        "goodbye",
+        "goodnight",
+        "haveagood",
+    )
+    return any(c in t for c in cues)
+
+
+def parse_hermes_reply(raw: str) -> tuple[str, bool]:
+    """解析爱马仕回复：含 EXIT_MARKER 则视为退出意图。"""
+    text = (raw or "").strip()
+    if not text:
+        return EXIT_REPLY, False
+
+    marker = EXIT_MARKER.strip()
+    marker_u = marker.upper()
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return EXIT_REPLY, False
+
+    def _line_is_marker(line: str) -> bool:
+        s = line.strip()
+        if s.upper() == marker_u:
+            return True
+        for sep in (":", "：", " ", "\t"):
+            if sep in s:
+                head = s.split(sep, 1)[0].strip()
+                if head.upper() == marker_u:
+                    return True
+        return s.upper().startswith(marker_u)
+
+    # 前两行任一为标记（模型偶发多写空行/解释）
+    exit_cmd = False
+    body_lines = list(lines)
+    for idx in range(min(2, len(body_lines))):
+        if _line_is_marker(body_lines[idx]):
+            exit_cmd = True
+            body_lines = body_lines[idx + 1 :]
+            break
+
+    if not exit_cmd and marker_u in text.upper():
+        # 标记夹在段首
+        if text.upper().lstrip().startswith(marker_u):
+            exit_cmd = True
+            rest = text[len(marker) :] if text.upper().startswith(marker_u) else text
+            # crude strip first line
+            parts = rest.splitlines()
+            body_lines = [ln.strip() for ln in parts[1:] if ln.strip()] if parts else []
+
+    if exit_cmd:
+        body = "\n".join(body_lines).strip()
+        # 去掉正文里残留标记
+        if body.upper().startswith(marker_u):
+            body = "\n".join(body.splitlines()[1:]).strip()
+        return (body or EXIT_REPLY), True
+
+    return text, False
+
+
+def _hermes_user_content(text: str) -> str:
+    """每轮附带退出规则，避免 session 续聊后系统提示被冲掉。"""
+    return f"{text}\n\n{HERMES_EXIT_REMINDER}"
+
+
 # ---------------------------------------------------------------------------
 # 爱马仕（服务端会话；本地不拼多轮 messages）
 # ---------------------------------------------------------------------------
 
-def ask_hermes(user_text: str, session_id: Optional[str] = None) -> tuple[str, Optional[str]]:
+def ask_hermes(
+    user_text: str, session_id: Optional[str] = None
+) -> tuple[str, Optional[str], bool]:
     """调用 Hermes chat/completions。
 
-    返回 (reply, session_id)。续聊时带上 X-Hermes-Session-Id，由爱马仕 SessionDB
-    加载历史；body 只发本轮新消息。无 session_id 时为首轮，附带 system。
+    返回 (reply, session_id, exit_intent)。
+    续聊时带上 X-Hermes-Session-Id；body 只发本轮新消息。
     """
     text = (user_text or "").strip()
     if not text:
-        return "我没有听清，请再说一次。", session_id
+        return "我没有听清，请再说一次。", session_id, False
 
     if not HERMES_API_KEY:
         log.warning("未配置 HERMES_API_KEY，使用 mock 回复")
-        return _mock_hermes(text, reason="no_key"), session_id
+        if is_exit_command(text):
+            return EXIT_REPLY, session_id, True
+        return _mock_hermes(text, reason="no_key"), session_id, False
 
     url = f"{HERMES_API_BASE}/v1/chat/completions"
     headers = {
@@ -149,11 +270,13 @@ def ask_hermes(user_text: str, session_id: Optional[str] = None) -> tuple[str, O
     }
     if session_id:
         headers["X-Hermes-Session-Id"] = session_id
-        messages: list[dict[str, Any]] = [{"role": "user", "content": text}]
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": _hermes_user_content(text)}
+        ]
     else:
         messages = [
             {"role": "system", "content": HERMES_SYSTEM_PROMPT},
-            {"role": "user", "content": text},
+            {"role": "user", "content": _hermes_user_content(text)},
         ]
 
     body: dict[str, Any] = {
@@ -168,15 +291,19 @@ def ask_hermes(user_text: str, session_id: Optional[str] = None) -> tuple[str, O
             r = client.post(url, headers=headers, json=body)
             r.raise_for_status()
             data = r.json()
-        reply = data["choices"][0]["message"]["content"]
-        reply = (reply or "").strip() or "查询完成，但没有返回内容。"
+        raw = data["choices"][0]["message"]["content"]
+        reply, exit_intent = parse_hermes_reply(raw or "")
         new_sid = (r.headers.get("X-Hermes-Session-Id") or session_id or "").strip() or None
         if new_sid and new_sid != session_id:
             log.info("Hermes session_id=%s", new_sid)
-        return reply, new_sid
+        if exit_intent:
+            log.info("Hermes 判定退出意图")
+        return reply, new_sid, exit_intent
     except Exception as e:
         log.warning("调用爱马仕失败，回退 mock: %s", e)
-        return _mock_hermes(text, reason=str(e)), session_id
+        if is_exit_command(text):
+            return EXIT_REPLY, session_id, True
+        return _mock_hermes(text, reason=str(e)), session_id, False
 
 
 def _mock_hermes(text: str, reason: str = "") -> str:
@@ -521,6 +648,7 @@ class DeviceSession:
             self.got_final = True
 
         self.uplink_enabled = False
+        keyword_exit = is_exit_command(text)
 
         try:
             await self.conn.send(_json("transcript", text=text))
@@ -543,10 +671,35 @@ class DeviceSession:
                         continue
 
             hb_task = asyncio.create_task(_processing_heartbeat())
+            exit_cmd = keyword_exit
             try:
-                reply, self.hermes_session_id = await asyncio.to_thread(
+                # 一律交给爱马仕：自然语言退出靠意图，口令列表仅作兜底
+                reply, self.hermes_session_id, hermes_exit = await asyncio.to_thread(
                     ask_hermes, text, self.hermes_session_id
                 )
+                # 口令子串命中（退下吧/Bye bye），或爱马仕 EXIT_DIALOG；
+                # 若助手已在告别且用户短句含退出意味，再兜底一次
+                soft = len(_normalize_cmd(text)) <= 16 and any(
+                    x in _normalize_cmd(text)
+                    for x in ("退", "拜", "见", "先", "谢", "bye", "好了", "行了")
+                )
+                exit_cmd = (
+                    hermes_exit
+                    or keyword_exit
+                    or (soft and looks_like_farewell_reply(reply))
+                )
+                if exit_cmd:
+                    self.reset_dialog()
+                    if not (reply or "").strip():
+                        reply = EXIT_REPLY
+                    log.info(
+                        "退出对话 (hermes=%s keyword=%s soft=%s) text=%s reply=%s",
+                        hermes_exit,
+                        keyword_exit,
+                        soft and looks_like_farewell_reply(reply),
+                        text,
+                        (reply or "")[:40],
+                    )
             finally:
                 stop_hb.set()
                 try:
@@ -555,9 +708,10 @@ class DeviceSession:
                     pass
 
             log.info(
-                "Hermes 回复: %s (session=%s)",
+                "Hermes 回复: %s (session=%s%s)",
                 reply,
                 self.hermes_session_id or "-",
+                ", exit" if exit_cmd else "",
             )
             if not self._closed:
                 await self.conn.send(_json("reply", text=reply))
@@ -636,12 +790,20 @@ class DeviceSession:
                             await self.conn.send(_json("play_start"))
                         await self.conn.send(_json("play_stop"))
                         log.info("play_stop 已发送，共下发 PCM %s bytes", total)
+                        if exit_cmd:
+                            await self.conn.send(_json("dialog_end", reason="exit_phrase"))
+                            log.info("dialog_end 已发送（退出续听）")
                     except Exception as stop_err:
-                        log.warning("发送 play_stop 失败: %s", stop_err)
+                        log.warning("发送 play_stop/dialog_end 失败: %s", stop_err)
                 await asyncio.sleep(PLAY_STOP_SETTLE_MS / 1000.0)
                 self.playing = False
-                log.info("下行 TTS 结束（保持 WebSocket，等待下一轮）")
-                self._arm_idle_timer()
+                if exit_cmd:
+                    self.reset_dialog()
+                    self._cancel_idle_timer()
+                    log.info("退出对话完成（需再次唤醒）")
+                else:
+                    log.info("下行 TTS 结束（保持 WebSocket，等待下一轮）")
+                    self._arm_idle_timer()
         except Exception as e:
             self.playing = False
             log.exception("处理句子失败: %s", e)
@@ -649,9 +811,15 @@ class DeviceSession:
                 if not self._closed:
                     await self.conn.send(_json("error", message=str(e)))
                     await self.conn.send(_json("play_stop"))
+                    if exit_cmd:
+                        await self.conn.send(_json("dialog_end", reason="exit_error"))
             except Exception:
                 pass
-            self._arm_idle_timer()
+            if exit_cmd:
+                self.reset_dialog()
+                self._cancel_idle_timer()
+            else:
+                self._arm_idle_timer()
         finally:
             with self._lock:
                 self._busy = False

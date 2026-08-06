@@ -335,6 +335,7 @@ static esp_err_t api_data_handler(httpd_req_t *req)
 
 #if CONFIG_ENV_SOUND_ENABLE
     float sound_db = 0.0f;
+    bool sound_ok = false;
     if (sensor_settings_sound_enabled() && env_sound_get_db(&sound_db)) {
         sound_db += sensor_settings_sound_offset_db();
         if (sound_db < 0.0f) {
@@ -342,13 +343,45 @@ static esp_err_t api_data_handler(httpd_req_t *req)
         } else if (sound_db > 140.0f) {
             sound_db = 140.0f;
         }
+        sound_ok = true;
         cJSON_AddNumberToObject(root, "sound", (int)lround(sound_db));
     } else {
         cJSON_AddNullToObject(root, "sound");
     }
 #else
+    float sound_db = 0.0f;
+    bool sound_ok = false;
     cJSON_AddNullToObject(root, "sound");
 #endif
+
+    /* 实时超限状态（供网页角标）；事件仍由 env_event_detector 持续确认后发出 */
+    {
+        cJSON *alarms = cJSON_AddObjectToObject(root, "alarms");
+        if (alarms != NULL) {
+            const bool env_ok = env.env_ready;
+            const bool lux_ok = env.lux_ready;
+            cJSON_AddBoolToObject(alarms, "temp_high",
+                                  env_ok && env.temperature >= sensor_settings_temp_high());
+            cJSON_AddBoolToObject(alarms, "humidity_high",
+                                  env_ok && env.humidity >= sensor_settings_humidity_high());
+            cJSON_AddBoolToObject(alarms, "humidity_low",
+                                  env_ok && env.humidity <= sensor_settings_humidity_low());
+            cJSON_AddBoolToObject(alarms, "co2_high",
+                                  env_ok && (float)env.co2 >= (float)sensor_settings_co2_warning_ppm());
+            cJSON_AddBoolToObject(alarms, "lux_dark",
+                                  lux_ok && env.lux <= sensor_settings_lux_dark());
+            cJSON_AddBoolToObject(alarms, "lux_bright",
+                                  lux_ok && env.lux >= sensor_settings_lux_bright());
+#if CONFIG_ENV_SOUND_ENABLE
+            cJSON_AddBoolToObject(alarms, "sound_db_high",
+                                  sound_ok && sound_db >= sensor_settings_sound_warning_db());
+#else
+            cJSON_AddBoolToObject(alarms, "sound_db_high", false);
+            (void)sound_ok;
+            (void)sound_db;
+#endif
+        }
+    }
 
     esp_err_t err = send_json(req, root);
     cJSON_Delete(root);

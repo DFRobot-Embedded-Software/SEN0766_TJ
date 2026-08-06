@@ -28,7 +28,7 @@ static const char *TAG = "env_evt";
 #define CONFIG_EVENT_ENV_POLL_MS 2000
 #endif
 #ifndef CONFIG_EVENT_ENV_CONFIRM_MS
-#define CONFIG_EVENT_ENV_CONFIRM_MS 60000
+#define CONFIG_EVENT_ENV_CONFIRM_MS 10000
 #endif
 
 #define ENV_WATCH_STACK 6144

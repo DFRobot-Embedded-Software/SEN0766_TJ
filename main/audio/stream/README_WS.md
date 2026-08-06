@@ -40,8 +40,9 @@
   - `FOLLOWUP_MS == 0`：播完立即 `dialog_idle`（每轮需唤醒；无跨轮会话）。
 - 续听窗口**不算 busy**；播放/等待下行仍算 busy（本阶段无 barge-in）。
 - 开上行后若长时间无有效语音，用 `FOLLOWUP_MS` 短超时 abort，避免空挂 ASR。
+- **退出对话**：由爱马仕判定自然语言退出意图（告别/先这样/可以了等）；口令列表仅作兜底。判定退出后播告别语并下发 `{"op":"dialog_end"}`，设备不再续听。
 
-网关侧：多轮上下文由爱马仕 SessionDB 维护（请求头 `X-Hermes-Session-Id`）；bridge 只保存 session id，不本地拼 `messages`。`dialog_idle` / 断线时清空 id；漏发时有 `DIALOG_IDLE_FALLBACK_S` 兜底。
+网关侧：多轮上下文由爱马仕 SessionDB 维护（请求头 `X-Hermes-Session-Id`）；bridge 只保存 session id，不本地拼 `messages`。`dialog_idle` / `dialog_end` / 断线时清空 id；漏发时有 `DIALOG_IDLE_FALLBACK_S` 兜底。
 
 ## 下行（网关 → 设备播放）
 
