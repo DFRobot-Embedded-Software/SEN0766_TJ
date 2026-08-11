@@ -58,10 +58,10 @@
 
 .radar-event { margin-top: 12px; padding: 10px 13px; border: 1px solid #dbe6f8; border-radius: 7px; background: #f7faff; display: grid; grid-template-columns: 76px 1fr; gap: 10px; align-items: start; }
 .radar-event > span { color: #667085; font-size: 12px; padding-top: 8px; }
-.radar-event-list { max-height: 132px; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 6px; -webkit-overflow-scrolling: touch; }
-.radar-event-item { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; min-height: 28px; }
-.radar-event-item b { overflow: hidden; color: #1265ee; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
-.radar-event-item small { color: #8a94a6; font-size: 12px; white-space: nowrap; }
+.radar-event-list { max-height: 180px; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 6px; -webkit-overflow-scrolling: touch; }
+.radar-event-item { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: start; min-height: 28px; }
+.radar-event-item b { color: #1265ee; font-size: 13px; font-weight: 600; line-height: 1.35; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+.radar-event-item small { color: #8a94a6; font-size: 12px; white-space: nowrap; padding-top: 2px; }
 .radar-event-empty { color: #8a94a6; font-size: 13px; padding: 6px 0; }
 
 /* 所有反馈统一为页面中央固定尺寸弹框。 */

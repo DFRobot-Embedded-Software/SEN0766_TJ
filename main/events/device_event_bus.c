@@ -29,7 +29,7 @@ static const char *TAG = "event_bus";
 #endif
 #endif
 
-#define EVENT_JSON_MAX 512
+#define EVENT_JSON_MAX 1024
 
 typedef struct {
     bool valid;
@@ -166,6 +166,14 @@ esp_err_t device_event_emit(const device_event_t *ev)
         return ESP_ERR_NO_MEM;
     }
 
+    size_t payload_len = strlen(payload);
+    if (payload_len >= EVENT_JSON_MAX) {
+        ESP_LOGW(TAG, "event json too long (%u >= %u), drop type=%s",
+                 (unsigned)payload_len, (unsigned)EVENT_JSON_MAX, ev->type);
+        free(payload);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
     xSemaphoreTake(s_lock, portMAX_DELAY);
     event_record_t *slot = &s_log[s_next];
     slot->valid = true;
@@ -174,8 +182,7 @@ esp_err_t device_event_emit(const device_event_t *ev)
     slot->category[sizeof(slot->category) - 1] = '\0';
     strncpy(slot->type, ev->type, sizeof(slot->type) - 1);
     slot->type[sizeof(slot->type) - 1] = '\0';
-    strncpy(slot->json, payload, sizeof(slot->json) - 1);
-    slot->json[sizeof(slot->json) - 1] = '\0';
+    memcpy(slot->json, payload, payload_len + 1U);
     s_next = (uint8_t)((s_next + 1U) % CONFIG_DEVICE_EVENT_LOG_SIZE);
     if (s_count < CONFIG_DEVICE_EVENT_LOG_SIZE) {
         s_count++;
@@ -499,12 +506,28 @@ esp_err_t device_event_read_latest_mmwave(char **out_json)
     const cJSON *type = cJSON_GetObjectItem(src, "type");
     const cJSON *msg = cJSON_GetObjectItem(src, "message");
     const cJSON *ts = cJSON_GetObjectItem(src, "timestamp");
+    const cJSON *area_id = cJSON_GetObjectItem(src, "area_id");
+    const cJSON *person_id = cJSON_GetObjectItem(src, "person_id");
+    /* 与 recent_events 条目字段对齐，避免 UI/MCP 读到另一套键名 */
+    cJSON_AddStringToObject(out, "type", cJSON_IsString(type) ? type->valuestring : "");
+    cJSON_AddStringToObject(out, "category", DEVICE_EVENT_CAT_MMWAVE);
+    cJSON_AddStringToObject(out, "area", cJSON_IsString(area) ? area->valuestring : "毫米波");
+    cJSON_AddStringToObject(out, "message",
+                            cJSON_IsString(msg) ? msg->valuestring :
+                            (cJSON_IsString(type) ? type->valuestring : "—"));
+    cJSON_AddStringToObject(out, "timestamp", cJSON_IsString(ts) ? ts->valuestring : "—");
+    if (cJSON_IsNumber(area_id)) {
+        cJSON_AddNumberToObject(out, "area_id", area_id->valuedouble);
+    }
+    if (cJSON_IsNumber(person_id)) {
+        cJSON_AddNumberToObject(out, "person_id", person_id->valuedouble);
+    }
+    /* 兼容旧 UI：保留 name/event/time 别名 */
     cJSON_AddStringToObject(out, "name", cJSON_IsString(area) ? area->valuestring : "毫米波");
     cJSON_AddStringToObject(out, "event",
                             cJSON_IsString(msg) ? msg->valuestring :
                             (cJSON_IsString(type) ? type->valuestring : "—"));
     cJSON_AddStringToObject(out, "time", cJSON_IsString(ts) ? ts->valuestring : "—");
-    cJSON_AddStringToObject(out, "type", cJSON_IsString(type) ? type->valuestring : "");
     cJSON_Delete(src);
 
     *out_json = cJSON_PrintUnformatted(out);

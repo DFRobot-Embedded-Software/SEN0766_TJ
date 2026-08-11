@@ -25,7 +25,7 @@
 
 static const char *TAG = "radar_events";
 
-#define EVENT_MSG_LEN 160
+#define EVENT_MSG_LEN 256
 #define PERSON_TRACK_MAX 8
 
 #ifndef CONFIG_MCP_RADAR_POLL_INTERVAL_MS
@@ -111,7 +111,8 @@ static c4004_target_info_t s_poll_targets[PERSON_TRACK_MAX];
 
 /** Web 专用最近事件缓存（与总线解耦，避免被 clear/刷屏冲掉） */
 #define WEB_RANGE_EVENT_MAX 16
-#define WEB_RANGE_JSON_MAX  384
+/* 含最长区域名 + message 的 UTF-8 JSON；过小会截断导致 cJSON_Parse 失败、事件消失 */
+#define WEB_RANGE_JSON_MAX  1024
 typedef struct {
     bool valid;
     char type[24];
@@ -123,7 +124,7 @@ static uint8_t s_web_range_count;
 static SemaphoreHandle_t s_web_range_lock;
 
 #define MCP_RADAR_WATCH_STACK 12288
-#define RADAR_EVT_BUILD_TAG   "RADAR_EVT_20260731m"
+#define RADAR_EVT_BUILD_TAG   "RADAR_EVT_20260811a"
 
 static void web_range_push(const char *type, const char *area, int person_id,
                            int active, int static_count, const char *message)
@@ -170,13 +171,20 @@ static void web_range_push(const char *type, const char *area, int person_id,
         return;
     }
 
+    size_t json_len = strlen(printed);
+    if (json_len >= WEB_RANGE_JSON_MAX) {
+        ESP_LOGW(TAG, "web event json too long (%u >= %u), drop type=%s",
+                 (unsigned)json_len, (unsigned)WEB_RANGE_JSON_MAX, type);
+        free(printed);
+        return;
+    }
+
     xSemaphoreTake(s_web_range_lock, portMAX_DELAY);
     web_range_event_t *slot = &s_web_range[s_web_range_next];
     slot->valid = true;
     strncpy(slot->type, type, sizeof(slot->type) - 1);
     slot->type[sizeof(slot->type) - 1] = '\0';
-    strncpy(slot->json, printed, sizeof(slot->json) - 1);
-    slot->json[sizeof(slot->json) - 1] = '\0';
+    memcpy(slot->json, printed, json_len + 1U);
     s_web_range_next = (uint8_t)((s_web_range_next + 1U) % WEB_RANGE_EVENT_MAX);
     if (s_web_range_count < WEB_RANGE_EVENT_MAX) {
         s_web_range_count++;
@@ -396,7 +404,7 @@ static void process_person_motion(const area_config_t *cfg,
             }
             if (!pt->static_fired && (now - pt->static_since) >= static_need) {
                 snprintf(msg, sizeof(msg),
-                         "人员#%u在%s静止%s",
+                         "人员#%u在%s保持静止（%s）",
                          (unsigned)targets[t].index, area_name,
                          c4004_kinesia_desc(targets[t].kinesia));
                 if (emit_mmwave(DEVICE_EVENT_PERSON_STATIC, area_id, area_name,
@@ -417,7 +425,7 @@ static void process_person_motion(const area_config_t *cfg,
                     pt->moving_confirm_since = now;
                 } else if ((now - pt->moving_confirm_since) >= moving_need) {
                     snprintf(msg, sizeof(msg),
-                             "人员#%u在%s有%s",
+                             "人员#%u在%s开始活动（%s）",
                              (unsigned)targets[t].index, area_name,
                              c4004_kinesia_desc(targets[t].kinesia));
                     if (emit_mmwave(DEVICE_EVENT_PERSON_MOVING, area_id, area_name,
@@ -1396,6 +1404,8 @@ esp_err_t radar_events_fill_web_recent(cJSON *out_array, int max_count)
         cJSON *item = cJSON_Parse(rec->json);
         if (item != NULL) {
             cJSON_AddItemToArray(out_array, item);
+        } else {
+            ESP_LOGW(TAG, "skip corrupt web event type=%s", rec->type);
         }
     }
     xSemaphoreGive(s_web_range_lock);
