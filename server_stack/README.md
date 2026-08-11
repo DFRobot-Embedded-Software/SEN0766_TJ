@@ -58,6 +58,11 @@ mcp_servers:
     enabled: true
 ```
 
+资源 URI 经网关后为 `{设备id}__sensor://events`。
+
+- `resources/list` / `resources/read`：拉取
+- `resources/subscribe` + `GET /mcp`（`Accept: text/event-stream` + `MCP-Session-Id`）：接收 `notifications/resources/updated` SSE 推送
+
 ## 端口
 
 | 服务 | 端口 |

@@ -34,9 +34,9 @@ VOICE_WS_PATH = (os.environ.get("MCP_GW_VOICE_WS_PATH") or "/ws").strip() or "/w
 if not VOICE_WS_PATH.startswith("/"):
     VOICE_WS_PATH = "/" + VOICE_WS_PATH
 
-# 工具名前缀分隔符：{device_id}__{native_tool}
+# 工具/资源名前缀分隔符：{device_id}__{native}
 TOOL_SEP = "__"
 
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_NAME = "mcp-sensors-gw"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.3.0"

@@ -66,20 +66,26 @@ class RegisterApi:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
         try:
-            tools = await self.client.list_tools(rec.mcp_url)
-            self.registry.set_tools(rec.id, tools)
+            tools, resources = await self.client.fetch_catalog(rec.mcp_url)
+            self.registry.set_catalog(rec.id, tools=tools, resources=resources)
         except Exception as e:
             self.registry.mark_error(rec.id, str(e))
             return JSONResponse(
                 {
                     "ok": False,
-                    "error": f"registered but tools/list failed: {e}",
+                    "error": f"registered but catalog fetch failed: {e}",
                     "device": self.registry.to_public(rec),
                 },
                 status_code=502,
             )
 
-        log.info("registered device id=%s url=%s tools=%s", rec.id, rec.mcp_url, len(rec.tools))
+        log.info(
+            "registered device id=%s url=%s tools=%s resources=%s",
+            rec.id,
+            rec.mcp_url,
+            len(rec.tools),
+            len(rec.resources),
+        )
         return JSONResponse({"ok": True, "device": self.registry.to_public(rec)})
 
     async def heartbeat(self, request: Request) -> JSONResponse:
@@ -141,8 +147,8 @@ class RegisterApi:
         if not rec:
             return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
         try:
-            tools = await self.client.list_tools(rec.mcp_url)
-            self.registry.set_tools(rec.id, tools)
+            tools, resources = await self.client.fetch_catalog(rec.mcp_url)
+            self.registry.set_catalog(rec.id, tools=tools, resources=resources)
             return JSONResponse({"ok": True, "device": self.registry.to_public(rec)})
         except Exception as e:
             self.registry.mark_error(rec.id, str(e))

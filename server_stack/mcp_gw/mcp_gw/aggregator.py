@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import uuid
 from typing import Any, Optional
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from . import config
+from .device_bridge import DeviceNotificationBridge, split_public_uri
 from .device_client import DeviceMcpClient
 from .registry import DeviceRegistry
+from .sessions import SessionManager
 
 log = logging.getLogger("mcp_gw.agg")
 
@@ -17,11 +21,19 @@ GATEWAY_LIST_DEVICES = "gw.list_devices"
 
 
 class AggregatorMcp:
-    """对 Hermes 暴露的聚合 Streamable HTTP MCP（JSON 响应）。"""
+    """对 Hermes 暴露的聚合 Streamable HTTP MCP（JSON + GET SSE）。"""
 
-    def __init__(self, registry: DeviceRegistry, client: DeviceMcpClient) -> None:
+    def __init__(
+        self,
+        registry: DeviceRegistry,
+        client: DeviceMcpClient,
+        sessions: SessionManager,
+        bridge: DeviceNotificationBridge,
+    ) -> None:
         self.registry = registry
         self.client = client
+        self.sessions = sessions
+        self.bridge = bridge
 
     def public_tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = [
@@ -31,6 +43,8 @@ class AggregatorMcp:
                     "列出当前在线的传感器设备（id/name/url）。"
                     "调用具体设备工具前可用此工具确认设备 id；"
                     f"设备工具名格式为 {{id}}{config.TOOL_SEP}{{native_name}}。"
+                    f"设备资源 URI 格式为 {{id}}{config.TOOL_SEP}{{native_uri}}，"
+                    "例如 {{id}}__sensor://events。订阅后经 GET /mcp SSE 接收更新通知。"
                 ),
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             }
@@ -54,6 +68,24 @@ class AggregatorMcp:
                 )
         return tools
 
+    def public_resources(self) -> list[dict[str, Any]]:
+        resources: list[dict[str, Any]] = []
+        for rec in self.registry.list_online():
+            label = rec.name or rec.id
+            for r in rec.resources:
+                native_uri = str(r.get("uri") or "")
+                if not native_uri:
+                    continue
+                item = dict(r)
+                item["uri"] = f"{rec.id}{config.TOOL_SEP}{native_uri}"
+                desc = str(r.get("description") or r.get("name") or native_uri)
+                item["description"] = f"[{label}/{rec.id}] {desc}"
+                name = str(r.get("name") or "")
+                if name and config.TOOL_SEP not in name:
+                    item["name"] = f"{rec.id}{config.TOOL_SEP}{name}"
+                resources.append(item)
+        return resources
+
     async def handle_post(self, request: Request) -> Response:
         try:
             body = await request.json()
@@ -64,7 +96,6 @@ class AggregatorMcp:
             )
 
         if isinstance(body, list):
-            # 批量：逐条处理
             out = []
             session = request.headers.get("mcp-session-id")
             for item in body:
@@ -81,14 +112,13 @@ class AggregatorMcp:
             )
 
         session = request.headers.get("mcp-session-id")
-        # notification：无 id
         if "id" not in body and str(body.get("method") or "").startswith("notifications/"):
             return Response(status_code=202)
 
         result_msg = await self._dispatch_one(body, session)
-        # initialize 时分配 session
         if body.get("method") == "initialize":
             session = session or str(uuid.uuid4())
+            await self.sessions.ensure(session)
         resp = JSONResponse(result_msg)
         if session:
             resp.headers["MCP-Session-Id"] = session
@@ -106,14 +136,19 @@ class AggregatorMcp:
                     "id": req_id,
                     "result": {
                         "protocolVersion": config.PROTOCOL_VERSION,
-                        "capabilities": {"tools": {"listChanged": False}},
+                        "capabilities": {
+                            "tools": {"listChanged": False},
+                            "resources": {"subscribe": True, "listChanged": True},
+                        },
                         "serverInfo": {
                             "name": config.SERVER_NAME,
                             "version": config.SERVER_VERSION,
                         },
                         "instructions": (
-                            "这是多设备传感器聚合网关。先用 gw.list_devices 查看在线设备，"
-                            f"再调用 {{id}}{config.TOOL_SEP}sensors.get_snapshot 等工具。"
+                            "多设备传感器聚合网关。工具：{id}__sensors.get_snapshot；"
+                            "资源：{id}__sensor://events。"
+                            "resources/subscribe 后对 GET /mcp 打开 SSE（带 MCP-Session-Id）"
+                            "可接收 notifications/resources/updated。"
                         ),
                     },
                 }
@@ -126,6 +161,26 @@ class AggregatorMcp:
                     args = {}
                 result = await self._call_tool(name, args)
                 return {"jsonrpc": "2.0", "id": req_id, "result": result}
+            if method == "resources/list":
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {"resources": self.public_resources()},
+                }
+            if method == "resources/templates/list":
+                return {"jsonrpc": "2.0", "id": req_id, "result": {"resourceTemplates": []}}
+            if method == "resources/read":
+                uri = str((params or {}).get("uri") or "")
+                result = await self._read_resource(uri)
+                return {"jsonrpc": "2.0", "id": req_id, "result": result}
+            if method == "resources/subscribe":
+                uri = str((params or {}).get("uri") or "")
+                await self._subscribe(session, uri)
+                return {"jsonrpc": "2.0", "id": req_id, "result": {}}
+            if method == "resources/unsubscribe":
+                uri = str((params or {}).get("uri") or "")
+                await self._unsubscribe(session, uri)
+                return {"jsonrpc": "2.0", "id": req_id, "result": {}}
             if method == "ping":
                 return {"jsonrpc": "2.0", "id": req_id, "result": {}}
             return {
@@ -141,11 +196,31 @@ class AggregatorMcp:
                 "error": {"code": -32000, "message": str(e)},
             }
 
+    async def _subscribe(self, session: Optional[str], public_uri: str) -> None:
+        if not session:
+            raise RuntimeError("resources/subscribe 需要 MCP-Session-Id（先 initialize）")
+        if not public_uri:
+            raise RuntimeError("uri required")
+        # 校验格式与在线
+        device_id, _native = split_public_uri(public_uri)
+        rec = self.registry.get(device_id)
+        if rec is None:
+            raise RuntimeError(f"设备未注册: {device_id}")
+        online_ids = {r.id for r in self.registry.list_online()}
+        if rec.id not in online_ids:
+            raise RuntimeError(f"设备离线或心跳超时: {device_id}")
+        await self.sessions.subscribe(session, public_uri)
+        await self.bridge.on_subscribe(public_uri)
+
+    async def _unsubscribe(self, session: Optional[str], public_uri: str) -> None:
+        if not session:
+            return
+        await self.sessions.unsubscribe(session, public_uri)
+        await self.bridge.on_unsubscribe(public_uri)
+
     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == GATEWAY_LIST_DEVICES:
             devices = [self.registry.to_public(r) for r in self.registry.list_online()]
-            import json
-
             text = json.dumps(devices, ensure_ascii=False, indent=2)
             return {"content": [{"type": "text", "text": text}], "isError": False}
 
@@ -186,9 +261,86 @@ class AggregatorMcp:
                 "isError": True,
             }
 
+    async def _read_resource(self, public_uri: str) -> dict[str, Any]:
+        if config.TOOL_SEP not in public_uri:
+            raise RuntimeError(
+                f"资源 URI 须为 id{config.TOOL_SEP}native，例如 demo01{config.TOOL_SEP}sensor://events"
+            )
+        device_id, native_uri = public_uri.split(config.TOOL_SEP, 1)
+        rec = self.registry.get(device_id)
+        if rec is None:
+            raise RuntimeError(f"设备未注册: {device_id}")
+        online_ids = {r.id for r in self.registry.list_online()}
+        if rec.id not in online_ids:
+            raise RuntimeError(f"设备离线或心跳超时: {device_id}")
+
+        try:
+            result = await self.client.read_resource(rec.mcp_url, native_uri)
+        except Exception as e:
+            self.registry.mark_error(device_id, str(e))
+            raise RuntimeError(f"读取设备资源失败: {e}") from e
+
+        contents = result.get("contents")
+        if isinstance(contents, list):
+            rewritten = []
+            for item in contents:
+                if not isinstance(item, dict):
+                    rewritten.append(item)
+                    continue
+                row = dict(item)
+                uri = str(row.get("uri") or native_uri)
+                if uri.startswith(f"{device_id}{config.TOOL_SEP}"):
+                    row["uri"] = uri
+                else:
+                    row["uri"] = f"{device_id}{config.TOOL_SEP}{uri}"
+                rewritten.append(row)
+            result = dict(result)
+            result["contents"] = rewritten
+        return result
+
     async def handle_get(self, request: Request) -> Response:
-        # 最小兼容：不提供 SSE 推送
-        return JSONResponse(
-            {"error": "SSE not enabled; use POST JSON-RPC on /mcp"},
-            status_code=405,
+        accept = (request.headers.get("accept") or "").lower()
+        if "text/event-stream" not in accept and "*/*" not in accept:
+            return JSONResponse(
+                {"error": "Accept must include text/event-stream for SSE"},
+                status_code=406,
+            )
+
+        session_id = request.headers.get("mcp-session-id") or request.headers.get("MCP-Session-Id")
+        if not session_id:
+            return JSONResponse(
+                {"error": "MCP-Session-Id required (initialize via POST first)"},
+                status_code=400,
+            )
+
+        sess = await self.sessions.ensure(session_id)
+        sess.sse_attached = True
+        log.info("Hermes SSE open session=%s", session_id)
+
+        async def event_gen():
+            # 立即发注释，确认流已建立
+            yield ": connected\n\n"
+            try:
+                while True:
+                    try:
+                        note = await asyncio.wait_for(sess.queue.get(), timeout=15.0)
+                        payload = json.dumps(note, ensure_ascii=False)
+                        yield f"event: message\ndata: {payload}\n\n"
+                    except asyncio.TimeoutError:
+                        yield ": ping\n\n"
+            except asyncio.CancelledError:
+                raise
+            finally:
+                sess.sse_attached = False
+                log.info("Hermes SSE closed session=%s", session_id)
+
+        return StreamingResponse(
+            event_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "MCP-Session-Id": session_id,
+                "X-Accel-Buffering": "no",
+            },
         )

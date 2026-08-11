@@ -16,6 +16,7 @@ class DeviceRecord:
     last_seen: float = field(default_factory=time.time)
     online: bool = True
     tools: list[dict[str, Any]] = field(default_factory=list)
+    resources: list[dict[str, Any]] = field(default_factory=list)
     last_error: str = ""
 
     @property
@@ -101,11 +102,31 @@ class DeviceRegistry:
             return out
 
     def set_tools(self, device_id: str, tools: list[dict[str, Any]], error: str = "") -> None:
+        self.set_catalog(device_id, tools=tools, resources=None, error=error)
+
+    def set_resources(self, device_id: str, resources: list[dict[str, Any]]) -> None:
         with self._lock:
             rec = self._devices.get((device_id or "").strip().lower())
             if not rec:
                 return
-            rec.tools = tools
+            rec.resources = resources
+
+    def set_catalog(
+        self,
+        device_id: str,
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        resources: list[dict[str, Any]] | None = None,
+        error: str = "",
+    ) -> None:
+        with self._lock:
+            rec = self._devices.get((device_id or "").strip().lower())
+            if not rec:
+                return
+            if tools is not None:
+                rec.tools = tools
+            if resources is not None:
+                rec.resources = resources
             rec.last_error = error
             if not error:
                 rec.touch()
@@ -133,5 +154,6 @@ class DeviceRegistry:
             "online": rec.online and not stale,
             "last_seen": rec.last_seen,
             "tool_count": len(rec.tools),
+            "resource_count": len(rec.resources),
             "last_error": rec.last_error,
         }

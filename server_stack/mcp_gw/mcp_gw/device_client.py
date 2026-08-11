@@ -11,15 +11,24 @@ log = logging.getLogger("mcp_gw.device")
 
 
 class DeviceMcpClient:
-    """对 ESP32 Streamable HTTP MCP 的轻量客户端（initialize → list/call）。"""
+    """对 ESP32 Streamable HTTP MCP 的轻量客户端（initialize → list/call/read）。"""
 
     def __init__(self, timeout_s: float | None = None) -> None:
         self._timeout = timeout_s if timeout_s is not None else config.DEVICE_TIMEOUT_S
 
     async def list_tools(self, mcp_url: str) -> list[dict[str, Any]]:
+        tools, _resources = await self.fetch_catalog(mcp_url)
+        return tools
+
+    async def list_resources(self, mcp_url: str) -> list[dict[str, Any]]:
+        _tools, resources = await self.fetch_catalog(mcp_url)
+        return resources
+
+    async def fetch_catalog(self, mcp_url: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """一次会话拉取 tools + resources（resources 失败时返回空列表，不拖垮注册）。"""
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             session_id = await self._initialize(client, mcp_url)
-            result = await self._rpc(
+            tools_result = await self._rpc(
                 client,
                 mcp_url,
                 "tools/list",
@@ -27,10 +36,25 @@ class DeviceMcpClient:
                 session_id=session_id,
                 req_id=2,
             )
-        tools = (result or {}).get("tools") or []
-        if not isinstance(tools, list):
-            return []
-        return [t for t in tools if isinstance(t, dict) and t.get("name")]
+            resources: list[dict[str, Any]] = []
+            try:
+                res_result = await self._rpc(
+                    client,
+                    mcp_url,
+                    "resources/list",
+                    {},
+                    session_id=session_id,
+                    req_id=3,
+                )
+                raw = (res_result or {}).get("resources") or []
+                if isinstance(raw, list):
+                    resources = [r for r in raw if isinstance(r, dict) and r.get("uri")]
+            except Exception as e:
+                log.debug("resources/list failed for %s: %s", mcp_url, e)
+
+        tools_raw = (tools_result or {}).get("tools") or []
+        tools = [t for t in tools_raw if isinstance(t, dict) and t.get("name")] if isinstance(tools_raw, list) else []
+        return tools, resources
 
     async def call_tool(
         self,
@@ -52,10 +76,25 @@ class DeviceMcpClient:
             return {"content": [{"type": "text", "text": str(result)}], "isError": True}
         return result
 
+    async def read_resource(self, mcp_url: str, uri: str) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            session_id = await self._initialize(client, mcp_url)
+            result = await self._rpc(
+                client,
+                mcp_url,
+                "resources/read",
+                {"uri": uri},
+                session_id=session_id,
+                req_id=2,
+            )
+        if not isinstance(result, dict):
+            return {"contents": [{"uri": uri, "mimeType": "text/plain", "text": str(result)}]}
+        return result
+
     async def probe(self, mcp_url: str) -> tuple[bool, str]:
         try:
-            tools = await self.list_tools(mcp_url)
-            return True, f"ok tools={len(tools)}"
+            tools, resources = await self.fetch_catalog(mcp_url)
+            return True, f"ok tools={len(tools)} resources={len(resources)}"
         except Exception as e:
             return False, str(e)
 
@@ -81,7 +120,6 @@ class DeviceMcpClient:
         if isinstance(data, dict) and data.get("error"):
             raise RuntimeError(f"initialize error: {data['error']}")
 
-        # 新协议要求 initialized 通知
         note_headers = dict(headers)
         if session_id:
             note_headers["MCP-Session-Id"] = session_id
@@ -92,7 +130,6 @@ class DeviceMcpClient:
         }
         try:
             nr = await client.post(mcp_url, json=note, headers=note_headers)
-            # 部分固件对 notification 返回 202/空 body，不强制 2xx 以外失败
             if nr.status_code >= 400:
                 log.debug("initialized notify status=%s", nr.status_code)
         except Exception as e:
@@ -132,7 +169,6 @@ class DeviceMcpClient:
         if not text.strip():
             return {}
         if "text/event-stream" in ctype or text.lstrip().startswith("event:"):
-            # 取最后一条 data: JSON
             import json
 
             last = None

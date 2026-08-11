@@ -80,7 +80,19 @@ TAG：`mcp_gw`
 
 ### 爱马仕
 
-MCP 连接/工具列表问题看爱马仕自身日志；工具名形如 `{id}__sensors.get_snapshot`。
+MCP 连接问题看爱马仕自身日志。
+
+| 类型 | 命名 |
+|------|------|
+| 工具 | `{id}__sensors.get_snapshot` |
+| 资源 | `{id}__sensor://events`、`{id}__sensor://temperature`、`{id}__sensor://area/0/events` |
+
+爱马仕侧：
+
+1. `resources/list` / `resources/read`
+2. `resources/subscribe` 后对 `GET /mcp` 打开 SSE（带 `MCP-Session-Id`），接收 `notifications/resources/updated`
+
+设备 SSE 不可用时，网关会回退为短周期 `resources/read` 轮询并在内容变化时推送。
 
 ## 手动注册（调试）
 
@@ -90,12 +102,13 @@ curl -sS -X POST http://127.0.0.1:9080/api/devices/register \
   -d '{"id":"a1b2c3","name":"客厅","ip":"192.168.0.50","port":8080,"path":"/mcp_server"}'
 ```
 
-## 聚合工具名
+## 聚合名
 
-| 网关工具 | 说明 |
+| 网关入口 | 说明 |
 |----------|------|
 | `gw.list_devices` | 在线设备列表 |
-| `{id}__sensors.get_snapshot` 等 | 转发到设备原生工具 |
+| `{id}__sensors.get_snapshot` 等 | 转发设备工具 |
+| `{id}__sensor://events` 等 | 转发设备资源（list/read/subscribe+SSE） |
 
 ## 部署到语音机
 
@@ -108,4 +121,3 @@ curl -sS -X POST http://127.0.0.1:9080/api/devices/register \
 ## 后续（未做）
 
 - `tools/list_changed` SSE 推送
-- resources 聚合
