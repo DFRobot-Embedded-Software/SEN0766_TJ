@@ -534,7 +534,7 @@ menu "3. 音频算法 (YAMNet / 唤醒 / 透传)"
         config AUDIO_WS_URI
             string "网关 URI"
             depends on AUDIO_WS_ENABLE
-            default "ws://192.168.1.100:8080/ws/audio"
+            default "ws://192.168.1.27:8765/ws"
 
         config AUDIO_WS_AUTH_HEADER
             string "可选 Authorization 头完整行（空=不鉴权）"
@@ -635,5 +635,47 @@ menu "4. 设备事件"
         help
             读数持续超过阈值达到该时间后，才向事件总线发出环境告警。
             网页「超限」角标为即时对比，不受此延迟影响。
+
+endmenu
+
+menu "5. MCP 聚合网关 (mcp_gw)"
+
+    config MCP_GW_CLIENT_ENABLE
+        bool "联网后自动向 mcp_gw 注册"
+        default y
+        help
+            WiFi 连接且本机 MCP 启动后，POST 注册到聚合网关，并周期性心跳。
+            爱马仕只需配置网关上的唯一 MCP 入口，无需为每台设备手写 URL。
+
+    config MCP_GW_REGISTER_URL
+        string "注册 URL（mDNS 失败时回退）"
+        depends on MCP_GW_CLIENT_ENABLE
+        default "http://192.168.0.73:9080/api/devices/register"
+        help
+            完整路径。优先用 mDNS 发现时，本项仅作回退。
+
+    config MCP_GW_MDNS_DISCOVER
+        bool "用 mDNS 自动发现聚合网关"
+        depends on MCP_GW_CLIENT_ENABLE
+        default y
+        help
+            browse 局域网 _mcp-gw._tcp，从 TXT path 拼出注册 URL。
+            网关进程需开启 MCP_GW_MDNS=1（默认）。
+
+    config MCP_GW_TOKEN
+        string "可选 X-MCP-GW-Token（空=不鉴权）"
+        depends on MCP_GW_CLIENT_ENABLE
+        default ""
+
+    config MCP_GW_DEVICE_NAME
+        string "设备显示名（空=仅用 MAC 短 id）"
+        depends on MCP_GW_CLIENT_ENABLE
+        default ""
+
+    config MCP_GW_HEARTBEAT_S
+        int "心跳间隔 (秒)"
+        depends on MCP_GW_CLIENT_ENABLE
+        default 30
+        range 10 600
 
 endmenu

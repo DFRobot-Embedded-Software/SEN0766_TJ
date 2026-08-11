@@ -27,6 +27,9 @@
 
 #if CONFIG_AUDIO_WS_ENABLE
 #include "esp_websocket_client.h"
+#if CONFIG_MCP_GW_CLIENT_ENABLE
+#include "mcp_gw_client.h"
+#endif
 #endif
 
 static const char *TAG = "audio_ws";
@@ -534,6 +537,18 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base, int32_t 
     }
 }
 
+static const char *active_ws_uri(void)
+{
+    const char *uri = CONFIG_AUDIO_WS_URI;
+#if CONFIG_MCP_GW_CLIENT_ENABLE
+    const char *discovered = mcp_gw_get_voice_ws_uri();
+    if (discovered && discovered[0]) {
+        uri = discovered;
+    }
+#endif
+    return uri;
+}
+
 static esp_err_t ensure_client_started(void)
 {
     if (s_client != NULL && !s_ws_dead && esp_websocket_client_is_connected(s_client)) {
@@ -548,9 +563,12 @@ static esp_err_t ensure_client_started(void)
 
     destroy_client();
 
+    const char *uri = active_ws_uri();
+    ESP_LOGI(TAG, "using gateway URI: %s", uri);
+
     /* 栈/缓冲过大或 internal 碎片时 xTaskCreate 会失败（Error create websocket task） */
     esp_websocket_client_config_t cfg = {
-        .uri = CONFIG_AUDIO_WS_URI,
+        .uri = uri,
         .buffer_size = WS_BUFFER_SIZE,
         .task_stack = WS_TASK_STACK,
         .task_prio = WS_TASK_PRIO,
@@ -667,7 +685,7 @@ static void do_session_start(void)
     } else {
         s_start_pending = true;
         voice_listen();
-        ESP_LOGI(TAG, "connecting to %s …", CONFIG_AUDIO_WS_URI);
+        ESP_LOGI(TAG, "connecting to %s …", active_ws_uri());
     }
 }
 
@@ -1022,7 +1040,7 @@ esp_err_t audio_ws_client_init(void)
     }
 
     s_inited = true;
-    ESP_LOGI(TAG, "init OK sink=%d uri=%s eos=%dms max=%dms dl_wait=%dms followup=%dms",
+    ESP_LOGI(TAG, "init OK sink=%d uri=%s (fallback) eos=%dms max=%dms dl_wait=%dms followup=%dms",
              s_sink_id, CONFIG_AUDIO_WS_URI,
              CONFIG_AUDIO_WS_EOS_MS, CONFIG_AUDIO_WS_MAX_MS,
              CONFIG_AUDIO_WS_DOWNLINK_WAIT_MS, CONFIG_AUDIO_WS_FOLLOWUP_MS);

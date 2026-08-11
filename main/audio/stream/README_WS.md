@@ -6,7 +6,9 @@
 
 ## 连接
 
-- URI 示例：`ws://192.168.1.100:8080/ws/audio`
+- 优先：入网后通过 mDNS `_mcp-gw._tcp` 的 TXT `ws=` 自动发现（与 MCP 注册同一广播）
+- 回退：`CONFIG_AUDIO_WS_URI`（默认 `ws://192.168.1.27:8765/ws`）
+- 串口关键字：`audio_ws: using gateway URI:` / `mcp_gw: mDNS voice WS:` / `mcp_gw: voice WS URI:`
 - 可选鉴权：`CONFIG_AUDIO_WS_AUTH_HEADER`（完整头行，如 `Authorization: Bearer <token>`）
 
 ## 上行（设备 → 网关，麦克风）

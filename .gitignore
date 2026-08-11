@@ -14,3 +14,14 @@ Thumbs.db
 
 # YAMNet weights (~4MB)；用 scripts/fetch_yamnet_model.ps1 下载
 models/yamnet/yamnet.tflite
+
+# Python
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 服务器栈本地运行时（源码保留）
+server_stack/**/venv/
+server_stack/**/.env
+server_stack/logs/

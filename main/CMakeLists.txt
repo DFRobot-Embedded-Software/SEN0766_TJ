@@ -20,6 +20,7 @@ set(srcs
     "mcp/providers/mcp_provider_env.c"
     "mcp/providers/mcp_provider_radar.c"
     "mcp/mcp_server.c"
+    "mcp/mcp_gw_client.c"
     "ota/ota_update.c"
     "led/ws2812_led.c"
     "led/ws2812_fx.c"
@@ -87,7 +88,7 @@ idf_component_register(
         "audio/sound"
     REQUIRES
         nvs_flash esp_wifi esp_wifi_remote esp_hosted esp_event esp_netif
-        esp_http_server spiffs json mdns driver
+        esp_http_server esp_http_client spiffs json mdns driver
         espressif__mcp-c-sdk
         esp_timer
         esp_system

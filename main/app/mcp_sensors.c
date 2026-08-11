@@ -13,6 +13,7 @@ static const char *TAG = "mcp_sensors";
 #include "esp_sntp.h"
 #include "mdns.h"
 #include "mcp_server.h"
+#include "mcp_gw_client.h"
 #include "board_snapshot.h"
 #include "ota_update.h"
 #include "web_fs.h"
@@ -65,39 +66,66 @@ static void init_time_sync(void)
 
 static void on_wifi_connected(const char *ip_addr)
 {
+    static char s_mdns_id[8];
+    char host[32] = "mcp-sensors";
+    char inst[40] = "MCP Sensors";
+    s_mdns_id[0] = '\0';
+    if (mcp_gw_device_id(s_mdns_id, sizeof(s_mdns_id)) == ESP_OK) {
+        snprintf(host, sizeof(host), "mcp-sensors-%s", s_mdns_id);
+        snprintf(inst, sizeof(inst), "MCP Sensors %s", s_mdns_id);
+    }
+
     ESP_LOGI(TAG, "boot: phase6 online");
     ESP_LOGI(TAG, "WiFi connected:");
-    ESP_LOGI(TAG, "  Web UI: http://%s or http://mcp-sensors.local", ip_addr);
+    ESP_LOGI(TAG, "  Web UI: http://%s or http://%s.local", ip_addr, host);
     ESP_LOGI(TAG, "  MCP:    http://%s:%d%s", ip_addr, MCP_HTTP_PORT, MCP_ENDPOINT_URI);
+    ESP_LOGI(TAG, "  device_id: %s", s_mdns_id[0] ? s_mdns_id : "(unknown)");
 
     rgb_ui_set_net(RGB_NET_OK);
 
     mdns_init();
-    mdns_hostname_set("mcp-sensors");
-    mdns_instance_name_set("MCP Sensors");
+    mdns_hostname_set(host);
+    mdns_instance_name_set(inst);
     mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+    /* 便于同网发现；注册仍以 mcp_gw HTTP 为准 */
+    mdns_txt_item_t mcp_txt[] = {
+        {.key = "path", .value = MCP_ENDPOINT_URI},
+        {.key = "id", .value = s_mdns_id},
+    };
+    mdns_service_add(NULL, "_mcp", "_tcp", MCP_HTTP_PORT, mcp_txt, 2);
 
     init_time_sync();
 
     web_server_stop();
     mcp_server_stop();
+#if CONFIG_MCP_GW_CLIENT_ENABLE
+    mcp_gw_client_stop();
+#endif
 
     esp_err_t err = mcp_server_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "MCP server start failed: %s", esp_err_to_name(err));
         return;
     }
+    ESP_LOGI(TAG, "MCP server up, starting mcp_gw client (if enabled)");
+
+#if CONFIG_MCP_GW_CLIENT_ENABLE
+    /* 不依赖 Web 仪表盘；MCP 起来即可向聚合网关注册 */
+    err = mcp_gw_client_start(ip_addr);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "mcp_gw client start failed: %s", esp_err_to_name(err));
+    }
+#endif
 
     err = web_server_start_dashboard();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "web server start failed: %s", esp_err_to_name(err));
-        mcp_server_stop();
-        return;
-    }
-
-    err = web_server_register_static_routes();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "static routes register failed: %s", esp_err_to_name(err));
+        /* MCP / mcp_gw 已启动，不因网页失败而停掉 */
+    } else {
+        err = web_server_register_static_routes();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "static routes register failed: %s", esp_err_to_name(err));
+        }
     }
 
     /* 联网 + 核心服务均已起来，确认本次（可能是 OTA 后的）固件可用，取消回滚保护 */
@@ -110,6 +138,9 @@ static void on_ap_started(void)
     if (rgb_ui_get_net() != RGB_NET_FAIL) {
         rgb_ui_set_net(RGB_NET_AP_WAIT);
     }
+#if CONFIG_MCP_GW_CLIENT_ENABLE
+    mcp_gw_client_stop();
+#endif
     mcp_server_stop();
     mdns_free();
     web_server_stop();
