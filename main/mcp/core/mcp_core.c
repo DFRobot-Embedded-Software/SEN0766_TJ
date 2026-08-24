@@ -131,10 +131,16 @@ void mcp_core_notify_resource(const char *uri)
         return;
     }
 
+    /* session_id=NULL：广播给所有 SSE 客户端。无人订阅时 SDK 返回 NOT_FOUND，属正常。 */
     esp_err_t err = esp_mcp_mgr_emit_message(s_mgr, NULL, msg);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "notify failed (%s): %s", uri, esp_err_to_name(err));
+    if (err == ESP_OK) {
+        return;
     }
+    if (err == ESP_ERR_NOT_FOUND || err == ESP_ERR_NOT_SUPPORTED) {
+        ESP_LOGD(TAG, "notify skip (%s): no SSE client (%s)", uri, esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGW(TAG, "notify failed (%s): %s", uri, esp_err_to_name(err));
 }
 
 esp_err_t mcp_core_start(void)
@@ -176,9 +182,14 @@ esp_err_t mcp_core_start(void)
         NULL));
     ESP_ERROR_CHECK(esp_mcp_set_instructions(
         s_mcp,
-        "Use sensors.get_snapshot for live readings. "
+        "Use sensors.get_snapshot for live readings (includes sound_db and thresholds). "
+        "Use sensors.get_thresholds for anomaly thresholds only "
+        "(sound.warning_db, temp_high, co2.warning_ppm, lux dark/bright). "
+        "sensors.get_config is radar area tags only, not env thresholds. "
+        "Prefer sensors.get_recent_events (limit/category) to poll events — "
+        "more reliable than resources/read sensor://events. "
         "Subscribe to sensor://temperature for environment push updates. "
-        "Subscribe to sensor://events for radar events; areas[] follows Web config. "
+        "Subscribe to sensor://events for radar/env/sound events; areas[] follows Web config. "
         "Per-area: sensor://area/{id}/events. "
         "Event types: range_enter, range_exit, room_empty, area_enter, area_exit, "
         "approach, away, person_static, person_moving; "

@@ -15,6 +15,7 @@ from .api import RegisterApi
 from .device_bridge import DeviceNotificationBridge
 from .device_client import DeviceMcpClient
 from .mdns_advertise import MdnsAdvertiser
+from .mqtt_ha import HaMqttBridge
 from .registry import DeviceRegistry
 from .sessions import SessionManager
 
@@ -30,6 +31,7 @@ class AppState:
         self.api = RegisterApi(self.registry, self.client)
         self.agg = AggregatorMcp(self.registry, self.client, self.sessions, self.bridge)
         self.mdns = MdnsAdvertiser()
+        self.mqtt = HaMqttBridge(self.registry, self.client)
         self._refresh_task: asyncio.Task | None = None
         self._prev_resource_keys: dict[str, frozenset[str]] = {}
 
@@ -62,15 +64,17 @@ async def _refresh_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: Starlette):
     log.info(
-        "mcp_gw starting host=%s port=%s stale=%.0fs refresh=%.0fs token=%s mdns=%s sse=yes",
+        "mcp_gw starting host=%s port=%s stale=%.0fs refresh=%.0fs token=%s mdns=%s mqtt=%s sse=yes",
         config.HOST,
         config.PORT,
         config.STALE_S,
         config.REFRESH_S,
         "yes" if config.TOKEN else "no",
         "yes" if config.MDNS_ENABLE else "no",
+        "on" if config.MQTT_ENABLE else "off",
     )
     await STATE.mdns.start()
+    await STATE.mqtt.start()
     STATE._refresh_task = asyncio.create_task(_refresh_loop())
     try:
         yield
@@ -81,8 +85,10 @@ async def lifespan(app: Starlette):
                 await STATE._refresh_task
             except asyncio.CancelledError:
                 pass
+        await STATE.mqtt.stop()
         await STATE.bridge.stop()
         await STATE.mdns.stop()
+        await STATE.client.close()
 
 
 async def health(_: Request) -> JSONResponse:
@@ -97,6 +103,7 @@ async def health(_: Request) -> JSONResponse:
             "mcp": "/mcp",
             "sse": True,
             "mdns": STATE.mdns.status(),
+            "mqtt": STATE.mqtt.status(),
         }
     )
 

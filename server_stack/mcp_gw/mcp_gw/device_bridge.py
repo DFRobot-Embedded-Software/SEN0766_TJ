@@ -9,6 +9,7 @@ from typing import Any, Optional
 import httpx
 
 from . import config
+from .device_client import delete_device_session
 from .registry import DeviceRegistry
 from .sessions import SessionManager
 
@@ -173,30 +174,34 @@ class _DeviceWatcher:
     async def _sse_loop(self, mcp_url: str) -> None:
         timeout = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            sid = await self._initialize(client, mcp_url)
-            self._device_session = sid
-            await self._subscribe_all(client, mcp_url, sid)
+            sid: Optional[str] = None
+            try:
+                sid = await self._initialize(client, mcp_url)
+                self._device_session = sid
+                await self._subscribe_all(client, mcp_url, sid)
 
-            headers = {"Accept": "text/event-stream"}
-            if sid:
-                headers["MCP-Session-Id"] = sid
-            log.info("device SSE open id=%s uris=%s", self.device_id, sorted(self.native_uris))
-            async with client.stream("GET", mcp_url, headers=headers) as resp:
-                if resp.status_code == 405:
-                    raise RuntimeError("device SSE 405")
-                resp.raise_for_status()
-                buf = ""
-                async for chunk in resp.aiter_text():
-                    if self._stop.is_set():
-                        return
-                    # 动态补订
-                    if self._wake.is_set():
-                        self._wake.clear()
-                        await self._subscribe_all(client, mcp_url, sid)
-                    buf += chunk
-                    while "\n\n" in buf:
-                        block, buf = buf.split("\n\n", 1)
-                        await self._handle_sse_block(block)
+                headers = {"Accept": "text/event-stream"}
+                if sid:
+                    headers["MCP-Session-Id"] = sid
+                log.info("device SSE open id=%s uris=%s", self.device_id, sorted(self.native_uris))
+                async with client.stream("GET", mcp_url, headers=headers) as resp:
+                    if resp.status_code == 405:
+                        raise RuntimeError("device SSE 405")
+                    resp.raise_for_status()
+                    buf = ""
+                    async for chunk in resp.aiter_text():
+                        if self._stop.is_set():
+                            return
+                        if self._wake.is_set():
+                            self._wake.clear()
+                            await self._subscribe_all(client, mcp_url, sid)
+                        buf += chunk
+                        while "\n\n" in buf:
+                            block, buf = buf.split("\n\n", 1)
+                            await self._handle_sse_block(block)
+            finally:
+                await delete_device_session(mcp_url, sid, client)
+                self._device_session = None
 
     async def _handle_sse_block(self, block: str) -> None:
         data_lines: list[str] = []
@@ -239,32 +244,37 @@ class _DeviceWatcher:
         deadline = asyncio.get_event_loop().time() + duration_s
         timeout = httpx.Timeout(config.DEVICE_TIMEOUT_S)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            sid = await self._initialize(client, mcp_url)
-            self._device_session = sid
-            while not self._stop.is_set() and asyncio.get_event_loop().time() < deadline:
-                for native in list(self.native_uris):
+            sid: Optional[str] = None
+            try:
+                sid = await self._initialize(client, mcp_url)
+                self._device_session = sid
+                while not self._stop.is_set() and asyncio.get_event_loop().time() < deadline:
+                    for native in list(self.native_uris):
+                        try:
+                            result = await self._rpc(
+                                client,
+                                mcp_url,
+                                "resources/read",
+                                {"uri": native},
+                                session_id=sid,
+                                req_id=20,
+                            )
+                            text = json.dumps(result, ensure_ascii=False, sort_keys=True)
+                            digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
+                            prev = self._hashes.get(native)
+                            self._hashes[native] = digest
+                            if prev is not None and prev != digest:
+                                public = f"{self.device_id}{config.TOOL_SEP}{native}"
+                                await self.sessions.publish_resource_updated(public)
+                        except Exception as e:
+                            log.debug("poll read %s/%s failed: %s", self.device_id, native, e)
                     try:
-                        result = await self._rpc(
-                            client,
-                            mcp_url,
-                            "resources/read",
-                            {"uri": native},
-                            session_id=sid,
-                            req_id=20,
-                        )
-                        text = json.dumps(result, ensure_ascii=False, sort_keys=True)
-                        digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
-                        prev = self._hashes.get(native)
-                        self._hashes[native] = digest
-                        if prev is not None and prev != digest:
-                            public = f"{self.device_id}{config.TOOL_SEP}{native}"
-                            await self.sessions.publish_resource_updated(public)
-                    except Exception as e:
-                        log.debug("poll read %s/%s failed: %s", self.device_id, native, e)
-                try:
-                    await asyncio.wait_for(self._stop.wait(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    pass
+                        await asyncio.wait_for(self._stop.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        pass
+            finally:
+                await delete_device_session(mcp_url, sid, client)
+                self._device_session = None
 
 
 class DeviceNotificationBridge:

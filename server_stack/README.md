@@ -15,13 +15,17 @@ server_stack/
 ## 移植到新机器
 
 1. 拷贝整个 `server_stack` 目录（不要拷本地 `venv/`，到新机再装）
-2. 安装爱马仕（只需一次）：
+2. 启动脚本会在缺 `python3-venv` 时**自动 `sudo apt install`**（需可 sudo；可能提示输入密码）。也可预先手动安装：
+   ```bash
+   sudo apt update && sudo apt install -y python3-venv python3-pip
+   ```
+3. 安装爱马仕（只需一次）：
    ```bash
    curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
    source ~/.bashrc
    hermes model          # 配置模型
    ```
-3. 配置语音 bridge：复制 `voice-bridge/.env.example` 为 `voice-bridge/.env`：
+4. 配置语音 bridge：复制 `voice-bridge/.env.example` 为 `voice-bridge/.env`：
    ```bash
    DASHSCOPE_API_KEY=sk-...     # 阿里云控制台申请
    HERMES_API_KEY=...           # 见下方说明（不是去官网申请）
@@ -42,7 +46,7 @@ server_stack/
    # → 写入 voice-bridge/.env 的 HERMES_API_KEY=那一行
    ```
    `./start_services.sh` 若发现 bridge 的 `HERMES_API_KEY` 为空，会尝试自动从 `API_SERVER_KEY` 同步。
-4. 启动：
+5. 启动：
    ```bash
    cd server_stack
    chmod +x *.sh
@@ -70,6 +74,9 @@ mcp_servers:
 | mcp_gw | 9080 |
 | voice-bridge | 8765 |
 | 爱马仕 API | 8642 |
+| HAOS MQTT（可选） | 192.168.0.219:1883 |
+
+传感器进 Home Assistant：在 `mcp_gw/.env` 配置 `MQTT_HOST` 等，见 `mcp_gw/README.md` 的 MQTT 一节。音频仍只走 voice-bridge，不进 MQTT。
 
 `start_services.sh` 顺序：mcp_gw → 爱马仕 → bridge（避免爱马仕启动时 MCP 尚未监听）。
 

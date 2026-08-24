@@ -19,6 +19,7 @@
 #include "cJSON.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_mcp_property.h"
 #include "esp_mcp_resource.h"
 #include "esp_mcp_tool.h"
 #include "freertos/FreeRTOS.h"
@@ -112,6 +113,44 @@ static esp_mcp_value_t fetch_radar_coord_callback(const esp_mcp_property_list_t 
     cJSON_AddNumberToObject(json, "target_count", target_count);
     cJSON_AddNumberToObject(json, "picked_index", picked_index);
     return mcp_json_to_value(json);
+}
+
+static esp_mcp_value_t get_recent_events_callback(const esp_mcp_property_list_t *properties)
+{
+    int limit = 10;
+    const char *category = NULL;
+    if (properties != NULL) {
+        int lim = esp_mcp_property_list_get_property_int(properties, "limit");
+        if (lim > 0) {
+            limit = lim;
+        }
+        if (limit > 32) {
+            limit = 32;
+        }
+        const char *cat = esp_mcp_property_list_get_property_string(properties, "category");
+        if (cat != NULL && cat[0] != '\0') {
+            category = cat;
+        }
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        return esp_mcp_value_create_bool(false);
+    }
+    cJSON *events = cJSON_AddArrayToObject(root, "events");
+    if (events == NULL) {
+        cJSON_Delete(root);
+        return esp_mcp_value_create_bool(false);
+    }
+
+    (void)device_event_bus_init();
+    (void)device_event_fill_recent(category, events, limit);
+    cJSON_AddNumberToObject(root, "count", cJSON_GetArraySize(events));
+    if (category != NULL) {
+        cJSON_AddStringToObject(root, "category", category);
+    }
+    cJSON_AddBoolToObject(root, "ready", cJSON_GetArraySize(events) > 0);
+    return mcp_json_to_value(root);
 }
 
 static esp_err_t radar_events_feed_read_cb(const char *uri,
@@ -300,6 +339,7 @@ static void on_device_event(const char *type, uint8_t area_id, void *ctx)
     (void)type;
     (void)ctx;
 
+    /* 全局事件流始终通知；无 SSE 客户端时 mcp_core 会静默跳过 */
     mcp_core_notify_resource(MCP_RESOURCE_EVENTS_URI);
     if (area_id != DEVICE_EVENT_AREA_ID_GLOBAL) {
         if (area_id < s_area_resource_count && s_area_resources[area_id].resource != NULL) {
@@ -307,6 +347,7 @@ static void on_device_event(const char *type, uint8_t area_id, void *ctx)
         }
         return;
     }
+    /* 全局事件也会出现在各 area feed（range_ room_empty）,仅在已注册时尝试推送 */
     for (uint8_t i = 0; i < s_area_resource_count; i++) {
         if (s_area_resources[i].resource != NULL) {
             mcp_core_notify_resource(s_area_resources[i].uri);
@@ -328,6 +369,21 @@ static esp_err_t radar_register_tools(esp_mcp_t *mcp)
         "Query current C4004 target position; when multiple targets exist, prefer motion.",
         fetch_radar_coord_callback);
     ESP_RETURN_ON_FALSE(tool, ESP_ERR_NO_MEM, TAG, "create coord tool failed");
+    ESP_RETURN_ON_ERROR(esp_mcp_add_tool(mcp, tool), TAG, "add coord tool failed");
+
+    tool = esp_mcp_tool_create(
+        "sensors.get_recent_events",
+        "Read recent device events (radar/env/sound) as a compact JSON array. "
+        "Prefer this over resources/read sensor://events for polling — lighter and more reliable. "
+        "Optional: limit (default 10, max 32), category (mmwave|env|sound|empty=all).",
+        get_recent_events_callback);
+    ESP_RETURN_ON_FALSE(tool, ESP_ERR_NO_MEM, TAG, "create recent events tool failed");
+    esp_mcp_property_t *limit_prop = esp_mcp_property_create_with_int("limit", 10);
+    ESP_RETURN_ON_FALSE(limit_prop, ESP_ERR_NO_MEM, TAG, "create limit property failed");
+    ESP_RETURN_ON_ERROR(esp_mcp_tool_add_property(tool, limit_prop), TAG, "add limit property failed");
+    esp_mcp_property_t *cat_prop = esp_mcp_property_create_with_string("category", "");
+    ESP_RETURN_ON_FALSE(cat_prop, ESP_ERR_NO_MEM, TAG, "create category property failed");
+    ESP_RETURN_ON_ERROR(esp_mcp_tool_add_property(tool, cat_prop), TAG, "add category property failed");
     return esp_mcp_add_tool(mcp, tool);
 }
 

@@ -11,10 +11,10 @@ import paramiko
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-HOST = os.environ.get("STACK_HOST", "192.168.1.27")
-USER = os.environ.get("STACK_USER", "haha")
+HOST = os.environ.get("STACK_HOST", "192.168.1.193")
+USER = os.environ.get("STACK_USER", "dfrobot")
 PASSWORD = os.environ.get("STACK_PASS", "123456")
-REMOTE_ROOT = "/home/haha/\u684c\u9762/mcp-sensors-stack"
+REMOTE_ROOT = os.environ.get("STACK_REMOTE", "/home/dfrobot/\u684c\u9762/server_stack")
 LOCAL_ROOT = Path(__file__).resolve().parents[1] / "server_stack"
 
 SKIP_DIRS = {"venv", "__pycache__", "logs", ".git"}
@@ -75,16 +75,16 @@ print(
 print(
     run(
         f"test -f '{REMOTE_ROOT}/voice-bridge/.env' || "
-        f"(test -f /home/haha/\u684c\u9762/hermes-voice-bridge/.env && "
-        f"cp /home/haha/\u684c\u9762/hermes-voice-bridge/.env '{REMOTE_ROOT}/voice-bridge/.env' || "
+        f"(test -f /home/dfrobot/\u684c\u9762/hermes-voice-bridge/.env && "
+        f"cp /home/dfrobot/\u684c\u9762/hermes-voice-bridge/.env '{REMOTE_ROOT}/voice-bridge/.env' || "
         f"cp '{REMOTE_ROOT}/voice-bridge/.env.example' '{REMOTE_ROOT}/voice-bridge/.env')"
     )
 )
 # 若旧桌面目录有 .env，优先合并过来
 print(
     run(
-        f"test -f /home/haha/\u684c\u9762/mcp-sensors-gw/.env && "
-        f"cp -n /home/haha/\u684c\u9762/mcp-sensors-gw/.env '{REMOTE_ROOT}/mcp_gw/.env' || true"
+        f"test -f /home/dfrobot/\u684c\u9762/mcp-sensors-gw/.env && "
+        f"cp -n /home/dfrobot/\u684c\u9762/mcp-sensors-gw/.env '{REMOTE_ROOT}/mcp_gw/.env' || true"
     )
 )
 
@@ -97,7 +97,7 @@ print(
         f"from pathlib import Path\n"
         f"p = Path('{REMOTE_ROOT}/mcp_gw/.env')\n"
         f"text = p.read_text(encoding='utf-8') if p.exists() else ''\n"
-        f"ip = '192.168.1.27'\n"
+        f"ip = {HOST!r}\n"
         f"lines = [ln for ln in text.splitlines() if not ln.startswith('MCP_GW_ADVERTISE_IP=')]\n"
         f"lines.append(f'MCP_GW_ADVERTISE_IP={{ip}}')\n"
         f"p.write_text('\\n'.join(lines)+'\\n', encoding='utf-8')\n"
@@ -107,5 +107,5 @@ print(
 )
 
 print(f"uploaded {uploaded} files → {REMOTE_ROOT}")
-print("on server: cd ~/桌面/mcp-sensors-stack && ./start_services.sh")
+print("on server: cd ~/桌面/server_stack && ./start_services.sh")
 ssh.close()

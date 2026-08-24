@@ -6,8 +6,10 @@
 
 #include "board_snapshot.h"
 #include "env_sensors.h"
+#include "env_sound.h"
 #include "mcp_core.h"
 #include "mcp_json_util.h"
+#include "sensor_settings.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -92,6 +94,42 @@ static cJSON *snapshot_to_json(const sensor_snapshot_t *snapshot)
         cJSON_AddItemToArray(areas, area);
     }
 
+#if CONFIG_ENV_SOUND_ENABLE
+    float sound_db = 0.0f;
+    if (sensor_settings_sound_enabled() && env_sound_get_db(&sound_db)) {
+        sound_db += sensor_settings_sound_offset_db();
+        if (sound_db < 0.0f) {
+            sound_db = 0.0f;
+        } else if (sound_db > 140.0f) {
+            sound_db = 140.0f;
+        }
+        cJSON_AddBoolToObject(root, "sound_ready", true);
+        cJSON_AddNumberToObject(root, "sound_db", (int)lround(sound_db));
+        cJSON_AddNumberToObject(root, "sound_warning_db",
+                                (double)sensor_settings_sound_warning_db());
+        cJSON_AddBoolToObject(root, "sound_alarm",
+                              sound_db >= sensor_settings_sound_warning_db());
+    } else {
+        cJSON_AddBoolToObject(root, "sound_ready", false);
+        cJSON_AddNullToObject(root, "sound_db");
+        cJSON_AddNumberToObject(root, "sound_warning_db",
+                                (double)sensor_settings_sound_warning_db());
+        cJSON_AddBoolToObject(root, "sound_alarm", false);
+    }
+#else
+    cJSON_AddBoolToObject(root, "sound_ready", false);
+    cJSON_AddNullToObject(root, "sound_db");
+    cJSON_AddNumberToObject(root, "sound_warning_db",
+                            (double)sensor_settings_sound_warning_db());
+    cJSON_AddBoolToObject(root, "sound_alarm", false);
+#endif
+
+    /* 附带异常判定阈值，避免再调一次 get_thresholds */
+    cJSON *thresholds = sensor_settings_to_json();
+    if (thresholds != NULL) {
+        cJSON_AddItemToObject(root, "thresholds", thresholds);
+    }
+
     return root;
 }
 
@@ -103,6 +141,16 @@ static esp_mcp_value_t get_snapshot_callback(const esp_mcp_property_list_t *prop
         return esp_mcp_value_create_bool(false);
     }
     return mcp_json_to_value(snapshot_to_json(&snapshot));
+}
+
+static esp_mcp_value_t get_thresholds_callback(const esp_mcp_property_list_t *properties)
+{
+    (void)properties;
+    cJSON *json = sensor_settings_to_json();
+    if (json == NULL) {
+        return esp_mcp_value_create_bool(false);
+    }
+    return mcp_json_to_value(json);
 }
 
 static esp_err_t temperature_resource_read_cb(const char *uri,
@@ -132,6 +180,19 @@ static esp_err_t temperature_resource_read_cb(const char *uri,
     cJSON_AddBoolToObject(json, "lux_ready", snap.lux_ready);
     if (snap.lux_ready) {
         cJSON_AddNumberToObject(json, "lux", (int)lround(snap.lux));
+    }
+#if CONFIG_ENV_SOUND_ENABLE
+    float sound_db = 0.0f;
+    if (sensor_settings_sound_enabled() && env_sound_get_db(&sound_db)) {
+        sound_db += sensor_settings_sound_offset_db();
+        cJSON_AddNumberToObject(json, "sound_db", (int)lround(sound_db));
+    }
+#endif
+    cJSON_AddNumberToObject(json, "sound_warning_db",
+                            (double)sensor_settings_sound_warning_db());
+    cJSON *thresholds = sensor_settings_to_json();
+    if (thresholds != NULL) {
+        cJSON_AddItemToObject(json, "thresholds", thresholds);
     }
 
     char *payload = cJSON_PrintUnformatted(json);
@@ -177,10 +238,21 @@ static esp_err_t env_register_tools(esp_mcp_t *mcp)
 {
     esp_mcp_tool_t *tool = esp_mcp_tool_create(
         "sensors.get_snapshot",
-        "Read environment (temp/humidity/CO2/lux) + area status. "
-        "Accelerometer is read separately (not part of MCP reporting).",
+        "Read live environment: temp/humidity/CO2/lux/sound_db, area status, "
+        "and thresholds (incl. sound.warning_db). "
+        "Use this for questions about current values or alert thresholds.",
         get_snapshot_callback);
     ESP_RETURN_ON_FALSE(tool, ESP_ERR_NO_MEM, TAG, "create snapshot tool failed");
+    ESP_RETURN_ON_ERROR(esp_mcp_add_tool(mcp, tool), TAG, "add snapshot tool failed");
+
+    tool = esp_mcp_tool_create(
+        "sensors.get_thresholds",
+        "Read environment anomaly thresholds only: "
+        "temperature_humidity.temp_high/humidity_high/humidity_low, "
+        "co2.warning_ppm, sound.warning_db (dB), light.dark_lux/bright_lux. "
+        "Same fields as Web sensor settings page.",
+        get_thresholds_callback);
+    ESP_RETURN_ON_FALSE(tool, ESP_ERR_NO_MEM, TAG, "create thresholds tool failed");
     return esp_mcp_add_tool(mcp, tool);
 }
 

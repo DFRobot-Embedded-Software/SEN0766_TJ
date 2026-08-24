@@ -241,14 +241,18 @@ static void append_areas_array(cJSON *root)
     }
 }
 
-static void append_events_to_array(cJSON *events,
-                                   uint8_t filter_area_id,
-                                   bool filter_area,
-                                   const char *category_filter)
+/* 调用方须已持 s_lock；只做字符串拷贝，不做 cJSON_Parse */
+static uint8_t copy_filtered_event_jsons(uint8_t filter_area_id,
+                                         bool filter_area,
+                                         const char *category_filter,
+                                         char *out_copies[],
+                                         uint8_t out_cap)
 {
-    if (events == NULL || s_count == 0) {
-        return;
+    uint8_t copy_n = 0;
+    if (out_copies == NULL || out_cap == 0 || s_count == 0) {
+        return 0;
     }
+
     uint8_t start = (uint8_t)((s_next + CONFIG_DEVICE_EVENT_LOG_SIZE - s_count) %
                               CONFIG_DEVICE_EVENT_LOG_SIZE);
     for (uint8_t n = 0; n < s_count; n++) {
@@ -264,7 +268,29 @@ static void append_events_to_array(cJSON *events,
             strcmp(rec->category, category_filter) != 0) {
             continue;
         }
-        cJSON *item = cJSON_Parse(rec->json);
+        if (copy_n >= out_cap) {
+            break;
+        }
+        out_copies[copy_n] = strdup(rec->json);
+        if (out_copies[copy_n] != NULL) {
+            copy_n++;
+        }
+    }
+    return copy_n;
+}
+
+static void parse_copies_into_array(cJSON *events, char *copies[], uint8_t copy_n)
+{
+    if (events == NULL || copies == NULL) {
+        return;
+    }
+    for (uint8_t i = 0; i < copy_n; i++) {
+        if (copies[i] == NULL) {
+            continue;
+        }
+        cJSON *item = cJSON_Parse(copies[i]);
+        free(copies[i]);
+        copies[i] = NULL;
         if (item != NULL) {
             cJSON_AddItemToArray(events, item);
         }
@@ -285,7 +311,9 @@ static void add_events_summary(cJSON *root, cJSON *events)
     }
     summary[0] = '\0';
 
-    for (int i = 0; i < n; i++) {
+    /* 摘要只取最近几条，避免超长字符串拖慢 MCP 响应 */
+    const int start = (n > 8) ? (n - 8) : 0;
+    for (int i = start; i < n; i++) {
         const cJSON *item = cJSON_GetArrayItem(events, i);
         const cJSON *msg = cJSON_GetObjectItem(item, "message");
         if (!cJSON_IsString(msg)) {
@@ -354,9 +382,14 @@ static char *build_feed_json(uint8_t filter_area_id,
         return NULL;
     }
 
+    /* 锁内只拷贝字符串；解锁后再 Parse，避免与 emit 互相拖死 */
+    char *copies[CONFIG_DEVICE_EVENT_LOG_SIZE];
+    memset(copies, 0, sizeof(copies));
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    append_events_to_array(events, filter_area_id, filter_area, category_filter);
+    uint8_t copy_n = copy_filtered_event_jsons(filter_area_id, filter_area, category_filter,
+                                               copies, CONFIG_DEVICE_EVENT_LOG_SIZE);
     xSemaphoreGive(s_lock);
+    parse_copies_into_array(events, copies, copy_n);
 
     add_events_summary(root, events);
     cJSON_AddBoolToObject(root, "ready", cJSON_GetArraySize(events) > 0);
@@ -424,8 +457,13 @@ esp_err_t device_event_read_latest_by_category(const char *category, char **out_
         return ESP_ERR_NOT_FOUND;
     }
 
-    cJSON *src = cJSON_Parse(found->json);
+    char *copy = strdup(found->json);
     xSemaphoreGive(s_lock);
+    if (copy == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    cJSON *src = cJSON_Parse(copy);
+    free(copy);
     if (src == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -448,9 +486,10 @@ esp_err_t device_event_fill_recent(const char *category, cJSON *out_array, int m
 
     uint8_t start = (uint8_t)((s_next + CONFIG_DEVICE_EVENT_LOG_SIZE - s_count) %
                               CONFIG_DEVICE_EVENT_LOG_SIZE);
-    /* 先从新到旧收集下标，再按旧到新追加 */
-    uint8_t matched[CONFIG_DEVICE_EVENT_LOG_SIZE];
-    uint8_t matched_n = 0;
+    /* 从新到旧收集，锁内只拷贝字符串 */
+    char *copies[CONFIG_DEVICE_EVENT_LOG_SIZE];
+    uint8_t copy_n = 0;
+    memset(copies, 0, sizeof(copies));
     for (uint8_t n = s_count; n > 0; n--) {
         uint8_t idx = (uint8_t)((start + n - 1U) % CONFIG_DEVICE_EVENT_LOG_SIZE);
         const event_record_t *rec = &s_log[idx];
@@ -461,20 +500,29 @@ esp_err_t device_event_fill_recent(const char *category, cJSON *out_array, int m
             strcmp(rec->category, category) != 0) {
             continue;
         }
-        matched[matched_n++] = idx;
-        if (max_count > 0 && matched_n >= (uint8_t)max_count) {
+        copies[copy_n] = strdup(rec->json);
+        if (copies[copy_n] != NULL) {
+            copy_n++;
+        }
+        if (max_count > 0 && copy_n >= (uint8_t)max_count) {
             break;
         }
     }
+    xSemaphoreGive(s_lock);
 
-    for (uint8_t i = matched_n; i > 0; i--) {
-        const event_record_t *rec = &s_log[matched[i - 1U]];
-        cJSON *item = cJSON_Parse(rec->json);
+    /* 新→旧收集，反转为旧→新追加 */
+    for (uint8_t i = copy_n; i > 0; i--) {
+        char *raw = copies[i - 1U];
+        copies[i - 1U] = NULL;
+        if (raw == NULL) {
+            continue;
+        }
+        cJSON *item = cJSON_Parse(raw);
+        free(raw);
         if (item != NULL) {
             cJSON_AddItemToArray(out_array, item);
         }
     }
-    xSemaphoreGive(s_lock);
     return ESP_OK;
 }
 

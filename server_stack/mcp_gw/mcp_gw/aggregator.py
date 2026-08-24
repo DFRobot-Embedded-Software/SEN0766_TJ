@@ -145,10 +145,12 @@ class AggregatorMcp:
                             "version": config.SERVER_VERSION,
                         },
                         "instructions": (
-                            "多设备传感器聚合网关。工具：{id}__sensors.get_snapshot；"
-                            "资源：{id}__sensor://events。"
-                            "resources/subscribe 后对 GET /mcp 打开 SSE（带 MCP-Session-Id）"
-                            "可接收 notifications/resources/updated。"
+                            "多设备传感器聚合网关。"
+                            "环境读数与阈值：{id}__sensors.get_snapshot（含 sound_db、sound_warning_db、thresholds）；"
+                            "仅阈值：{id}__sensors.get_thresholds（sound.warning_db 等）；"
+                            "雷达区域：{id}__sensors.get_config；"
+                            "事件轮询请优先：{id}__sensors.get_recent_events（limit/category，比 resources/read 更稳）；"
+                            "事件资源：{id}__sensor://events（subscribe + GET /mcp SSE）。"
                         ),
                     },
                 }

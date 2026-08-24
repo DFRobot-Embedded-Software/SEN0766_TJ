@@ -39,4 +39,20 @@ TOOL_SEP = "__"
 
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_NAME = "mcp-sensors-gw"
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.4.1"
+
+# Home Assistant MQTT Discovery（音频不走 MQTT）
+def _truthy(name: str, default: str = "0") -> bool:
+    return (os.environ.get(name) or default).strip().lower() in ("1", "true", "yes", "on")
+
+
+MQTT_HOST = (os.environ.get("MQTT_HOST") or "").strip()
+MQTT_PORT = _i("MQTT_PORT", 1883)
+MQTT_USER = (os.environ.get("MQTT_USER") or "").strip()
+MQTT_PASSWORD = (os.environ.get("MQTT_PASSWORD") or "").strip()
+MQTT_PREFIX = (os.environ.get("MQTT_PREFIX") or "mcp_sensors").strip() or "mcp_sensors"
+MQTT_DISCOVERY_PREFIX = (os.environ.get("MQTT_DISCOVERY_PREFIX") or "homeassistant").strip() or "homeassistant"
+MQTT_POLL_S = _f("MQTT_POLL_S", 15.0)
+MQTT_CLIENT_ID = (os.environ.get("MQTT_CLIENT_ID") or "mcp-sensors-gw").strip() or "mcp-sensors-gw"
+MQTT_ENABLE = bool(MQTT_HOST) and _truthy("MQTT_ENABLE", "1")
+
