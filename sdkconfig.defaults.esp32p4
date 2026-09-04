@@ -68,14 +68,16 @@ CONFIG_YAMNET_EVENT_HOLD_MS=4000
 CONFIG_YAMNET_INFER_TASK_CORE=-1
 
 # 仅验证 YAMNet 时启用（关闭 WiFi/传感器/MCP/Web）
-CONFIG_YAMNET_ENABLE=y
-CONFIG_YAMNET_VERIFY_ONLY=y
+# CONFIG_YAMNET_ENABLE is not set
+# CONFIG_YAMNET_VERIFY_ONLY is not set
 # CONFIG_AUDIO_STREAM_ENABLE is not set
 # CONFIG_ESP_SR_WAKE_ENABLE is not set
 # CONFIG_YAMNET_DISABLE_ESP_NN is not set
 
 # 启用唤醒后请在 menuconfig → ESP Speech Recognition 勾选 WakeNet，
 # 并 fullclean + build flash，以便把模型写入 model 分区。
+
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
 
 # ESP-NN Optimized
 # CONFIG_NN_ANSI_C is not set

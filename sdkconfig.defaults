@@ -69,19 +69,19 @@ CONFIG_NS4168_PLAYBACK_GAIN=1
 #
 # 3. 音频算法 (YAMNet / 唤醒 / 透传)
 #
-CONFIG_YAMNET_ENABLE=y
+# CONFIG_YAMNET_ENABLE is not set
 CONFIG_YAMNET_INFER_RMS_MIN=25
 
 #
 # ESP-SR 语音唤醒
 #
-CONFIG_ESP_SR_WAKE_ENABLE=y
+# CONFIG_ESP_SR_WAKE_ENABLE is not set
 # end of ESP-SR 语音唤醒
 
 #
 # WebSocket PCM 客户端（连网关）
 #
-CONFIG_AUDIO_WS_ENABLE=y
+# CONFIG_AUDIO_WS_ENABLE is not set
 # end of WebSocket PCM 客户端（连网关）
 # end of 3. 音频算法 (YAMNet / 唤醒 / 透传)
 
@@ -137,6 +137,7 @@ CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
 # LWIP
 #
 CONFIG_LWIP_MAX_SOCKETS=20
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
 
 #
 # TCP

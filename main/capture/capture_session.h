@@ -15,18 +15,30 @@
 extern "C" {
 #endif
 
+#define CAPTURE_SESSION_MIN_S     10
 #define CAPTURE_SESSION_MAX_S     300
 #define CAPTURE_ROOM_LEN          32
+#define CAPTURE_EVENT_LEN         32
 
 void capture_session_init(void);
 
 esp_err_t capture_session_set_room(const char *room);
 void capture_session_get_room(char *out, size_t out_len);
 
+esp_err_t capture_session_set_duration_s(int seconds);
+int capture_session_get_duration_s(void);
+
+esp_err_t capture_session_set_event(const char *event);
+void capture_session_get_event(char *out, size_t out_len);
+
 bool capture_session_time_ok(void);
+
+/** SNTP 回调：第一次对时成功后粘住，供网页轮询。 */
+void capture_session_mark_time_synced(void);
+
 bool capture_session_is_active(void);
 
-/** 开始采集。NTP 未同步或已在录则失败。 */
+/** 开始采集。NTP 未同步、Event 为空或已在录则失败。 */
 esp_err_t capture_session_start(void);
 
 /** 正常结束（PCM 连接排空后退出）。 */
@@ -46,6 +58,7 @@ int capture_session_read_pcm(void *buf, size_t buf_len, uint32_t wait_ms);
 
 cJSON *capture_session_status_json(void);
 cJSON *capture_session_sample_json(void);
+cJSON *capture_session_logs_json(void);
 
 #ifdef __cplusplus
 }

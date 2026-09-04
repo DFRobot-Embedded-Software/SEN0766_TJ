@@ -129,6 +129,8 @@ static TickType_t s_approach_hold_until[AREA_TAG_MAX];
 static TickType_t s_leave_hold_until[AREA_TAG_MAX];
 static TickType_t s_enter_hold_until[AREA_TAG_MAX];
 static TickType_t s_exit_hold_until[AREA_TAG_MAX];
+static bool s_boundary_saw_enter[AREA_TAG_MAX];
+static bool s_boundary_saw_exit[AREA_TAG_MAX];
 
 static TickType_t s_last_target_refresh;
 static TickType_t s_last_periodic_recover;
@@ -818,9 +820,11 @@ static void apply_boundary_value(c4004_tag_state_t *st, uint8_t tag_index, uint8
     if (value == C4004_BOUNDARY_ENTER) {
         st->enter = true;
         hold_signal(&s_enter_hold_until[tag_index]);
+        s_boundary_saw_enter[tag_index] = true;
     } else if (value == C4004_BOUNDARY_EXIT) {
         st->exit = true;
         hold_signal(&s_exit_hold_until[tag_index]);
+        s_boundary_saw_exit[tag_index] = true;
     } else if (value != C4004_BOUNDARY_NONE) {
         ESP_LOGW(TAG, "unknown enterExit=0x%02X", value);
     }
@@ -1234,6 +1238,8 @@ static void reset_local_state(void)
     memset(s_leave_hold_until, 0, sizeof(s_leave_hold_until));
     memset(s_enter_hold_until, 0, sizeof(s_enter_hold_until));
     memset(s_exit_hold_until, 0, sizeof(s_exit_hold_until));
+    memset(s_boundary_saw_enter, 0, sizeof(s_boundary_saw_enter));
+    memset(s_boundary_saw_exit, 0, sizeof(s_boundary_saw_exit));
     memset(s_smooth, 0, sizeof(s_smooth));
     s_target_count = 0;
     xSemaphoreGive(s_state_lock);
@@ -1486,6 +1492,8 @@ esp_err_t c4004_sensor_sync_tags(const area_config_t *cfg, uint8_t prev_count)
         memset(s_leave_hold_until, 0, sizeof(s_leave_hold_until));
         memset(s_enter_hold_until, 0, sizeof(s_enter_hold_until));
         memset(s_exit_hold_until, 0, sizeof(s_exit_hold_until));
+        memset(s_boundary_saw_enter, 0, sizeof(s_boundary_saw_enter));
+        memset(s_boundary_saw_exit, 0, sizeof(s_boundary_saw_exit));
         xSemaphoreGive(s_state_lock);
         return err;
     }
@@ -1540,6 +1548,8 @@ esp_err_t c4004_sensor_sync_tags(const area_config_t *cfg, uint8_t prev_count)
     memset(s_leave_hold_until, 0, sizeof(s_leave_hold_until));
     memset(s_enter_hold_until, 0, sizeof(s_enter_hold_until));
     memset(s_exit_hold_until, 0, sizeof(s_exit_hold_until));
+    memset(s_boundary_saw_enter, 0, sizeof(s_boundary_saw_enter));
+    memset(s_boundary_saw_exit, 0, sizeof(s_boundary_saw_exit));
     xSemaphoreGive(s_state_lock);
 
     ESP_LOGI(TAG, "synced %u tags to C4004 OK", cfg->tag_count);
@@ -1568,6 +1578,26 @@ esp_err_t c4004_sensor_get_tag_status(uint8_t index, area_status_t *out)
     out->leaving = signal_active(s_leave_hold_until[index]);
     xSemaphoreGive(s_state_lock);
     return ESP_OK;
+}
+
+uint8_t c4004_sensor_take_boundary_crossing(uint8_t index)
+{
+    if (index >= AREA_TAG_MAX) {
+        return C4004_BOUNDARY_NONE;
+    }
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    const bool saw_enter = s_boundary_saw_enter[index];
+    const bool saw_exit = s_boundary_saw_exit[index];
+    s_boundary_saw_enter[index] = false;
+    s_boundary_saw_exit[index] = false;
+    xSemaphoreGive(s_state_lock);
+    if (saw_exit) {
+        return C4004_BOUNDARY_EXIT;
+    }
+    if (saw_enter) {
+        return C4004_BOUNDARY_ENTER;
+    }
+    return C4004_BOUNDARY_NONE;
 }
 
 esp_err_t c4004_sensor_refresh_targets(void)

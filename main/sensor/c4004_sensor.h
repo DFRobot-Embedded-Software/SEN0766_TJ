@@ -25,6 +25,12 @@ esp_err_t c4004_sensor_sync_tags(const area_config_t *cfg, uint8_t prev_count);
 /** @brief 读取各标签最新状态（按 tag 下标，与 area_config.tags 对应） */
 esp_err_t c4004_sensor_get_tag_status(uint8_t index, area_status_t *out);
 
+/**
+ * 取出自上次 take 以来该边界标签的门事件（消耗）。
+ * @return 0 进入，1 离开，2 无；同窗又进又出返回 1
+ */
+uint8_t c4004_sensor_take_boundary_crossing(uint8_t index);
+
 /** @brief 主动查询当前轨迹目标；多目标时优先返回运动目标坐标 (cm) */
 esp_err_t c4004_sensor_query_target(float *x, float *y, uint8_t *target_count, int8_t *picked_index);
 

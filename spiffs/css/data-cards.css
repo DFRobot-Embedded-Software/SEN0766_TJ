@@ -3,11 +3,14 @@
 #page-data .title { min-height: 78px; padding: 18px 22px; flex-wrap: wrap; gap: 10px; }
 #page-data .title h2 { margin-bottom: 6px; font-size: 21px; line-height: 1.25; }
 #page-data .title p { font-size: 12px; line-height: 1.5; }
-.capture-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; width: 100%; }
-.capture-bar label { display: flex; align-items: center; gap: 8px; color: #475467; font-size: 12px; font-weight: 600; }
-.capture-bar input { height: 34px; width: 200px; border: 1px solid #e1e7f0; border-radius: 6px; padding: 0 10px; background: #fff; }
+.capture-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; margin: 0 0 13px; padding: 12px 16px; background: #fff; border: 1px solid #e1e7f0; border-radius: 10px; }
+.capture-bar label { display: flex; align-items: center; gap: 8px; flex: 1 1 140px; min-width: 0; max-width: 100%; color: #475467; font-size: 12px; font-weight: 600; }
+.capture-bar input { height: 34px; width: 100%; max-width: 220px; min-width: 0; border: 1px solid #e1e7f0; border-radius: 6px; padding: 0 10px; background: #fff; }
+.capture-bar input#captureDuration { max-width: 88px; }
+.capture-bar input#captureEvent { max-width: 160px; }
 #captureMeta { color: #8b94a3; font-size: 12px; }
 #captureBtn.recording { background: #d64545 !important; border-color: #d64545 !important; }
+#captureDownload.hidden { display: none !important; }
 #page-data .data-layout { display: grid; grid-template-columns: minmax(380px,410px) minmax(0,1fr); align-items: stretch; gap: 14px; }
 .modules { display: none !important; }
 #page-data .env,
@@ -20,7 +23,7 @@
 #page-data .env .card-action { white-space: nowrap; }
 
 /* 六个环境指标在桌面端采用两列三行，并填满与毫米波卡片相同的高度。 */
-#page-data .env .metrics { display: grid; flex: 1; grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-rows: repeat(3,minmax(118px,1fr)); gap: 10px; margin-top: 0; }
+#page-data .env .metrics { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-rows: repeat(3,minmax(118px,auto)); gap: 10px; margin-top: 0; }
 #page-data .env .metrics > div { position: relative; height: auto; min-height: 118px; padding: 16px 14px; grid-template-columns: 40px minmax(0,1fr); grid-template-rows: 24px 34px 18px; align-content: center; }
 #page-data .metrics i { width: 34px; height: 34px; font-size: 12px; }
 #page-data .metrics span:not(.metric-health) { overflow: hidden; color: #475467; font-size: 12px; font-weight: 600; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
@@ -59,6 +62,13 @@
   #page-data .title { min-height: 70px; padding: 14px 16px; }
   #page-data .title h2 { font-size: 19px; }
   #page-data .title p { font-size: 11px; }
+  .capture-bar { padding: 12px; gap: 8px; }
+  .capture-bar label { flex: 1 1 100%; }
+  .capture-bar input,
+  .capture-bar input#captureDuration,
+  .capture-bar input#captureEvent { max-width: none; width: 100%; }
+  .capture-bar .primary,
+  .capture-bar .secondary { flex: 1 1 auto; }
   #page-data .env,
   #page-data .radar-card { display: block; width: 100%; min-width: 0; padding: 15px; }
   #page-data .card-title { align-items: flex-start; }

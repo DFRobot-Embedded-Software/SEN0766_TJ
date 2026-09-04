@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include "esp_log.h"
@@ -50,6 +52,13 @@ static void on_wifi_connect_failed(void)
     rgb_ui_set_net(RGB_NET_FAIL);
 }
 
+static void on_sntp_sync(struct timeval *tv)
+{
+    (void)tv;
+    capture_session_mark_time_synced();
+    ESP_LOGI(TAG, "SNTP time synced");
+}
+
 static void init_time_sync(void)
 {
     setenv("TZ", "CST-8", 1);
@@ -60,7 +69,14 @@ static void init_time_sync(void)
     }
 
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_set_time_sync_notification_cb(on_sntp_sync);
+    esp_sntp_setservername(0, "ntp.aliyun.com");
+#if CONFIG_LWIP_SNTP_MAX_SERVERS > 1
+    esp_sntp_setservername(1, "ntp.tencent.com");
+#endif
+#if CONFIG_LWIP_SNTP_MAX_SERVERS > 2
+    esp_sntp_setservername(2, "pool.ntp.org");
+#endif
     esp_sntp_init();
     ESP_LOGI(TAG, "SNTP started (CST-8) for event timestamps");
 }
