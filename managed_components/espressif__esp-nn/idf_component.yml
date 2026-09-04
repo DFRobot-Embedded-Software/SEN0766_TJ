@@ -1,6 +1,6 @@
 dependencies:
   idf:
-    version: '>=4.2'
+    version: '>=5.1'
 description: Optimized NN (Neural Network) functions for Espressif chips
 files:
   exclude:
@@ -9,7 +9,7 @@ files:
 issues: https://github.com/espressif/esp-nn/issues
 repository: git://github.com/espressif/esp-nn.git
 repository_info:
-  commit_sha: 10b6c0fc884a3b05f94a752f91d00ebadfe5d8d0
+  commit_sha: 11ca4edafa2a5b314df1d4771775ec18757af72c
   path: .
 url: https://github.com/espressif/esp-nn
-version: 1.2.5
+version: 1.3.0

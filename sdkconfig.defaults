@@ -1,66 +1,193 @@
+# This file was generated using idf.py save-defconfig or menuconfig [D] key. It can be edited manually.
+# Espressif IoT Development Framework (ESP-IDF) 5.5.4 Project Minimal Configuration
+#
+CONFIG_IDF_TARGET="esp32p4"
+
+#
+# Bootloader config
+#
+
+#
+# Application Rollback
+#
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# end of Application Rollback
+# end of Bootloader config
+
+#
+# Serial flasher config
+#
+CONFIG_ESPTOOLPY_FLASHFREQ_40M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+# end of Serial flasher config
+
+#
+# Partition Table
+#
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="config/partitions.csv"
+# end of Partition Table
 
-# OTA：双槽升级 + 回滚保护（新固件联网成功前不标记为有效，异常时自动回退）
-CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+#
+# 1. 板级总线与传感器
+#
+CONFIG_SENSOR_I2C0_SDA=46
+CONFIG_SENSOR_I2C0_SCL=48
 
-# 全局默认 INFO；Debug 需编译进固件，运行时由 C4004_VERBOSE_LOG 打开毫米波 TAG
-# CONFIG_LOG_MAXIMUM_EQUALS_DEFAULT is not set
-CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+#
+# C4004 毫米波雷达 (UART)
+#
+CONFIG_C4004_UART_TX=11
+CONFIG_C4004_UART_RX=12
+# end of C4004 毫米波雷达 (UART)
+# end of 1. 板级总线与传感器
 
-# P4 必须使用 ESP-Hosted，不能开启 Host WiFi
-# CONFIG_ESP_HOST_WIFI_ENABLED is not set
+#
+# 2. 音频硬件 (ES7210 / NS4168)
+#
 
-# CONFIG_ESP_HOSTED_ENABLE_ITWT is not set
-# SDIO 握手失败时不要整机软复位（否则会持续复位环）；WiFi 失败由应用侧重试
-CONFIG_ESP_HOSTED_TRANSPORT_RESTART_ON_FAILURE=n
-# 给 C6 更长复位后启动时间，减少 "Not able to connect with slave"
-CONFIG_ESP_HOSTED_SDIO_RESET_DELAY_MS=3000
+#
+# ES7210 麦克风 (I2C1 + I2S0 RX)
+#
+CONFIG_ES7210_I2C_SDA=32
+CONFIG_ES7210_I2C_SCL=33
+CONFIG_ES7210_I2S_BCLK=28
+CONFIG_ES7210_I2S_WS=29
+CONFIG_ES7210_I2S_DIN=27
+# end of ES7210 麦克风 (I2C1 + I2S0 RX)
 
-# C4004 UART (TX=50, RX=51, 115200)
-CONFIG_C4004_UART_PORT=1
-CONFIG_C4004_UART_TX=50
-CONFIG_C4004_UART_RX=51
-CONFIG_C4004_UART_BAUD=115200
-CONFIG_C4004_VERBOSE_LOG=y
+#
+# NS4168 功放 (I2S1 TX)
+#
+CONFIG_NS4168_I2S_BCLK=40
+CONFIG_NS4168_I2S_WS=41
+CONFIG_NS4168_I2S_DOUT=39
+CONFIG_NS4168_PLAYBACK_GAIN=1
+# end of NS4168 功放 (I2S1 TX)
+# end of 2. 音频硬件 (ES7210 / NS4168)
 
-# C4004：倾角写 zAngle；检测范围默认最大四面边界（侧装约 4m×7m：X±2m / 前方 7m）
-CONFIG_C4004_TILT_ANGLE_Z=y
-CONFIG_C4004_RANGE_MODE_MAX=y
-CONFIG_C4004_RANGE_X_CM=200
-CONFIG_C4004_RANGE_Y_POS_CM=700
-CONFIG_C4004_RANGE_Y_NEG_CM=0
+#
+# 3. 音频算法 (YAMNet / 唤醒 / 透传)
+#
+CONFIG_YAMNET_ENABLE=y
+CONFIG_YAMNET_INFER_RMS_MIN=25
 
-CONFIG_AUDIO_CAPTURE_DIGITAL_GAIN=4
+#
+# ESP-SR 语音唤醒
+#
+CONFIG_ESP_SR_WAKE_ENABLE=y
+# end of ESP-SR 语音唤醒
 
-# NS4168 播放：TTS 偏小，默认 3 倍数字增益（可在 menuconfig 调）
-CONFIG_NS4168_PLAYBACK_GAIN=3
+#
+# WebSocket PCM 客户端（连网关）
+#
+CONFIG_AUDIO_WS_ENABLE=y
+# end of WebSocket PCM 客户端（连网关）
+# end of 3. 音频算法 (YAMNet / 唤醒 / 透传)
 
-# 环境声级：ES7210 PCM RMS → /api/data.sound
-CONFIG_ENV_SOUND_ENABLE=y
-CONFIG_ENV_SOUND_REF_DB=94
-CONFIG_ENV_SOUND_EMA_ALPHA_MILLI=200
+#
+# ESP Speech Recognition
+#
 
-# 本地局域网 MCP，无需 OAuth（避免 Hermes 等客户端误走 OAuth 发现流程）
-CONFIG_MCP_HTTP_OAUTH_METADATA_ENABLE=n
-# Hermes 等客户端可能发 OPTIONS 预检；SDK 仅在开启 CORS 时注册 OPTIONS handler
-CONFIG_MCP_HTTP_CORS_ENABLE=y
+#
+# Load Multiple Wake Words (WakeNet9)
+#
+CONFIG_SR_WN_WN9_HIESP=y
+# end of Load Multiple Wake Words (WakeNet9)
+# end of ESP Speech Recognition
 
-# WebSocket 收发分锁：下行时若仍持共享锁 send，会堵死读并 abort 连接
-CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y
-CONFIG_ESP_WS_CLIENT_TX_LOCK_TIMEOUT_MS=2000
+#
+# Component config
+#
 
-# ---- PSRAM：缓解播放+网页+MCP 并发时 internal 耗尽（SDIO RX alloc failed）----
-CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
-CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM=y
-# ≤4KB 仍优先 internal（小对象/DMA 友好）；更大块走 PSRAM
+#
+# ESP PSRAM
+#
+CONFIG_SPIRAM=y
+
+#
+# PSRAM config
+#
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# end of PSRAM config
+# end of ESP PSRAM
 
-# MCP 聚合网关：联网后自动注册（与语音网关同机 9080）
-CONFIG_MCP_GW_CLIENT_ENABLE=y
-CONFIG_MCP_GW_REGISTER_URL="http://192.168.1.27:9080/api/devices/register"
-CONFIG_MCP_GW_MDNS_DISCOVER=y
-CONFIG_MCP_GW_TOKEN=""
-CONFIG_MCP_GW_DEVICE_NAME=""
-CONFIG_MCP_GW_HEARTBEAT_S=30
+#
+# ESP System Settings
+#
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+# end of ESP System Settings
+
+#
+# Log
+#
+
+#
+# Log Level
+#
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+# end of Log Level
+# end of Log
+
+#
+# LWIP
+#
+CONFIG_LWIP_MAX_SOCKETS=20
+
+#
+# TCP
+#
+CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4
+# end of TCP
+# end of LWIP
+
+#
+# ESP-Hosted config
+#
+
+#
+# Hosted SDIO Configuration
+#
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_CMD_SLOT_1=7
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_CLK_SLOT_1=3
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D0_SLOT_1=4
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D1_4BIT_BUS_SLOT_1=5
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D2_4BIT_BUS_SLOT_1=1
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D3_4BIT_BUS_SLOT_1=2
+CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE=6
+CONFIG_ESP_HOSTED_SDIO_RESET_DELAY_MS=3000
+# end of Hosted SDIO Configuration
+
+#
+# Task defaults
+#
+CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM=y
+# end of Task defaults
+
+CONFIG_ESP_HOSTED_TRANSPORT_RESTART_ON_FAILURE=n
+CONFIG_ESP_HOSTED_ENABLE_ITWT=n
+CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
+# end of ESP-Hosted config
+
+#
+# ESP WebSocket client
+#
+CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y
+# end of ESP WebSocket client
+
+#
+# Wi-Fi Remote
+#
+
+#
+# Wi-Fi configuration
+#
+CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=10
+CONFIG_WIFI_RMT_RX_BA_WIN=6
+# end of Wi-Fi configuration
+# end of Wi-Fi Remote
+# end of Component config

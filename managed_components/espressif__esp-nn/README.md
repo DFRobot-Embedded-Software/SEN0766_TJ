@@ -8,6 +8,7 @@ The library contains optimised NN (Neural Network) functions for various Espress
 * Supported ESP chips include:
    * ESP32-S3 (Assembly versions optimised to benefit from vector instructions of ESP32-S3)
    * ESP32-P4 (Optimised using PIE/QACC SIMD instructions)
+   * ESP32-S31 (Optimised using PIE/QACC SIMD instructions, shares ESP32-P4 kernels)
    * ESP32 (Generic optimisations)
    * ESP32-C3 (Generic optimisations)
 
@@ -35,6 +36,29 @@ The library contains optimised NN (Neural Network) functions for various Espress
     | softmax         | 14260   | 8587    | 1.66    | width: 256  | Internal  |
     | hard_swish      | 703970  | 516582  | 1.36    | size: 12544 | External  |
     | mean            | 10113   | 4686    | 2.16    | 7x7x16     | Internal  |
+
+
+  * Kernelwise performance on ESP32-S31 chip
+    * Numbers are ticks taken for kernel to execute
+    * Chip config: 320MHz, data in internal memory
+    * Note: on ESP32-S31 the PIE coprocessor is available on core 1 only; tasks using optimized kernels are automatically migrated to core 1 by ESP-IDF
+
+    | Function        | ANSI C  | Optimized | Opt Ratio | Data info   | Memory    |
+    | ----------------| --------|-----------|-----------|-------------|-----------|
+    | elementwise_add | 196283  | 75032     | 2.62      | size = 1615 | Internal  |
+    | elementwise_mul | 83337   | 45765     | 1.82      | size = 1615 | Internal  |
+    | convolution     | 4107787 | 658148    | 6.24      | input(10,10), filter(64x1x1x64), pad(0,0), stride(1,1) | Internal |
+    | convolution     | 277008  | 94210     | 2.94      | input(8,8), filter(16x1x1x16), pad(0,0), stride(1,1) | Internal |
+    | convolution     | 1798390 | 765708    | 2.35      | input(8,8), filter(64x3x3x3), pad(0,0), stride(1,1) | Internal |
+    | depthwise conv  | 315201  | 118944    | 2.65      | out(10,10), pad(1,1), stride(1,1), filter: 1x3x3x16 | Internal |
+    | depthwise conv  | 1325229 | 755116    | 1.75      | out(12,12), pad(1,1), stride(1,1), filter: 8x5x5x4 | Internal |
+    | max pool        | 274866  | 21724     | 12.65     | input(16,16), filter(1x3x3x16) | Internal |
+    | avg pool        | 297200  | 75257     | 3.95      | input(16,16), filter(1x3x3x16) | Internal |
+    | fully connected | 7594    | 4280      | 1.77      | len: 271, ch = 3, non-zero input offset | Internal |
+    | prelu (relu6)   | 625     | 123       | 5.08      | size: 1615  | Internal  |
+    | softmax         | 12090   | 8225      | 1.47      | h: 8, w: 32 | Internal  |
+    | hard_swish      | 620950  | 421618    | 1.47      | size: 12544 | Internal  |
+    | mean            | 10447   | 4399      | 2.37      | 7x7x16      | Internal  |
 
 
   * Kernelwise performance on ESP32-S3 chip
@@ -65,6 +89,7 @@ The library contains optimised NN (Neural Network) functions for various Espress
     | Chip     | CPU Freq | without ESP-NN | with ESP-NN |
     | -------- | -------- | -------------- | ----------- |
     | ESP32-P4 | 360MHz   | 1395ms         | 73ms        |
+    | ESP32-S31 | 320MHz  | 1669ms         | 72ms        |
     | ESP32-S3 | 240MHz   | 2300ms         | 54ms        |
     | ESP32    | 240MHz   | 4084ms         | 380ms       |
     | ESP32-C3 | 160MHz   | 3355ms         | 426ms       |
@@ -80,7 +105,6 @@ The library contains optimised NN (Neural Network) functions for various Espress
   - The above is time taken for execution of the `invoke()` call
   - SPIRAM used for TensorArena.
   - Person detection on ESP32-S3 with internal RAM: 47ms
-  - ESP32-P4 optimisation is work in progress
   - `Without ESP-NN` case is when `esp-nn` is completely disabled by removing below flag from [CMakeLists.txt](CMakeLists.txt):
     ```cmake
       # enable ESP-NN optimizations by Espressif
@@ -95,7 +119,7 @@ The library contains optimised NN (Neural Network) functions for various Espress
      * Optimized versions
      * ANSI C
 
-  * Default selection is for `Optimized versions`. For ESP32-S3 and ESP32-P4, assembly versions are automatically selected, whereas for other chips (viz., ESP32, ESP32-C3), generic optimisations are selected.
+  * Default selection is for `Optimized versions`. For ESP32-S3, ESP32-P4 and ESP32-S31, assembly versions are automatically selected, whereas for other chips (viz., ESP32, ESP32-C3), generic optimisations are selected.
   * For debugging purposes, you may want to select `ANSI C` reference versions.
 
 

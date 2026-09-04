@@ -1,0 +1,951 @@
+﻿
+########## mcp_gw/device_mqtt.py ##########
+"""MQTT broker provisioning fallback for devices.
+
+Primary path remains mDNS _mcp-gw TXT mqtt=.
+Fallback: when device reports empty mqtt_broker, push broker via HTTP /api/wifi action=mqtt.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+import httpx
+
+from . import config
+
+log = logging.getLogger("mcp_gw.device_mqtt")
+
+
+def _is_loopback(host: str) -> bool:
+    h = (host or "").strip().lower()
+    if h.startswith("mqtt://"):
+        h = h[7:]
+    elif h.startswith("mqtts://"):
+        h = h[8:]
+    h = h.split("/")[0]
+    if h.startswith("["):
+        h = h.split("]")[0].lstrip("[")
+    else:
+        h = h.split(":")[0]
+    return (not h) or h in ("127.0.0.1", "localhost", "0.0.0.0", "::1") or h.startswith("127.")
+
+
+def broker_uri_for_device(lan_ip: str) -> str:
+    raw = (config.MQTT_HOST or "").strip()
+    if not raw:
+        return ""
+    host = lan_ip if _is_loopback(raw) else raw
+    if host.startswith("mqtt://"):
+        host = host[7:].split("/")[0].split(":")[0]
+    elif host.startswith("mqtts://"):
+        host = host[8:].split("/")[0].split(":")[0]
+    if _is_loopback(host):
+        return ""
+    return f"mqtt://{host}:{int(config.MQTT_PORT or 1883)}"
+
+
+async def push_if_missing(device_ip: str) -> bool:
+    """Push broker only when device has empty mqtt_broker."""
+    uri = broker_uri_for_device(device_ip)
+    if not uri:
+        log.warning("skip mqtt push: invalid broker host (check MQTT_HOST / advertise_ip)")
+        return False
+    wifi_url = f"http://{device_ip}/api/wifi"
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            r = await client.get(wifi_url)
+            r.raise_for_status()
+            info: Any = r.json()
+            if isinstance(info, dict):
+                existing = str(info.get("mqtt_broker") or "").strip()
+                if existing:
+                    return True
+            body = {
+                "action": "mqtt",
+                "broker": uri,
+                "user": (config.MQTT_USER or "").strip(),
+                "password": (config.MQTT_PASSWORD or "").strip(),
+            }
+            w = await client.post(wifi_url, json=body)
+            txt = (w.text or "")[:180]
+            if w.status_code >= 400:
+                log.warning("mqtt push failed %s status=%s body=%s", device_ip, w.status_code, txt)
+                return False
+            log.info("mqtt pushed %s -> %s", uri, device_ip)
+            return True
+    except Exception as e:
+        log.debug("mqtt push skip %s: %s", device_ip, e)
+        return False
+
+########## mcp_gw/app.py ##########
+from __future__ import annotations
+
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Route
+
+from . import config
+from .aggregator import AggregatorMcp
+from .api import RegisterApi
+from .coap_client import DeviceCoapClient
+from .coap_poll import CoapSnapshotPoller
+from .mdns_advertise import MdnsAdvertiser
+from .mdns_devices import MdnsDeviceBrowser
+from .mqtt_ha import HaMqttBridge
+from .registry import DeviceRegistry
+from .sessions import SessionManager
+
+log = logging.getLogger("mcp_gw")
+
+
+class AppState:
+    def __init__(self) -> None:
+        self.registry = DeviceRegistry(stale_s=config.STALE_S)
+        self.client = DeviceCoapClient(timeout_s=config.DEVICE_TIMEOUT_S)
+        self.sessions = SessionManager()
+        self.api = RegisterApi(self.registry)
+        self.agg = AggregatorMcp(self.registry, self.client, self.sessions)
+        self.mdns = MdnsAdvertiser()
+        self.mdns_dev = MdnsDeviceBrowser(self.registry)
+        self.mqtt = HaMqttBridge(self.registry, self.sessions)
+        self.coap_poll = CoapSnapshotPoller(self.registry, self.client, self.mqtt)
+
+
+STATE = AppState()
+
+
+@asynccontextmanager
+async def lifespan(app: Starlette):
+    log.info(
+        "mcp_gw starting as device adapter host=%s port=%s mdns=%s mqtt=%s "
+        "(/mcp is legacy; agents should use Home Assistant /api/mcp)",
+        config.HOST,
+        config.PORT,
+        "yes" if config.MDNS_ENABLE else "no",
+        "on" if config.MQTT_ENABLE else "off",
+    )
+    await STATE.mdns.start()
+    await STATE.mdns_dev.start()
+    await STATE.mqtt.start()
+    await STATE.coap_poll.start()
+    try:
+        yield
+    finally:
+        await STATE.coap_poll.stop()
+        await STATE.mqtt.stop()
+        await STATE.mdns_dev.stop()
+        await STATE.mdns.stop()
+
+
+async def health(_: Request) -> JSONResponse:
+    online = STATE.registry.list_online()
+    return JSONResponse(
+        {
+            "ok": True,
+            "service": config.SERVER_NAME,
+            "version": config.SERVER_VERSION,
+            "devices_total": len(STATE.registry.list_all()),
+            "devices_online": len(online),
+            "role": "device-adapter",
+            "mcp": "/mcp",
+            "mcp_note": "legacy debug; agents use Home Assistant /api/mcp",
+            "device_protocol": "coap+mqtt-event",
+            "sse": True,
+            "mdns": STATE.mdns.status(),
+            "mqtt": STATE.mqtt.status(),
+        }
+    )
+
+
+async def mcp_post(request: Request) -> Response:
+    return await STATE.agg.handle_post(request)
+
+
+async def mcp_get(request: Request) -> Response:
+    return await STATE.agg.handle_get(request)
+
+
+def create_app() -> Starlette:
+    routes = [
+        Route("/health", health, methods=["GET"]),
+        Route("/api/devices", STATE.api.list_devices, methods=["GET"]),
+        Route("/api/devices/register", STATE.api.register, methods=["POST"]),
+        Route("/api/devices/{id}", STATE.api.delete_device, methods=["DELETE"]),
+        Route("/mcp", mcp_post, methods=["POST"]),
+        Route("/mcp", mcp_get, methods=["GET"]),
+    ]
+    return Starlette(routes=routes, lifespan=lifespan)
+
+
+app = create_app()
+
+########## mcp_gw/api.py ##########
+from __future__ import annotations
+
+import logging
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+from . import config
+from .registry import DeviceRegistry
+
+log = logging.getLogger("mcp_gw.api")
+
+
+def _unauthorized() -> JSONResponse:
+    return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+
+
+def _check_token(request: Request) -> bool:
+    if not config.TOKEN:
+        return True
+    got = request.headers.get("x-mcp-gw-token") or ""
+    q = request.query_params.get("token") or ""
+    return got == config.TOKEN or q == config.TOKEN
+
+
+class RegisterApi:
+    """鍙€夋墜宸ョ櫥璁帮紱涓昏矾寰勬槸娴忚 _mcp-sensors._udp銆備笉鍐嶆媺鍙栬澶?HTTP MCP 鐩綍銆?""
+
+    def __init__(self, registry: DeviceRegistry) -> None:
+        self.registry = registry
+
+    async def register(self, request: Request) -> JSONResponse:
+        if not _check_token(request):
+            return _unauthorized()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid json"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"ok": False, "error": "object required"}, status_code=400)
+
+        device_id = str(body.get("id") or "").strip()
+        name = str(body.get("name") or "").strip()
+        fw = str(body.get("fw") or "").strip()
+        base_url = str(body.get("base_url") or "").strip()
+        ip = str(body.get("ip") or "").strip()
+        port = int(body.get("port") or body.get("coap_port") or 5683)
+        if not base_url:
+            if not ip:
+                return JSONResponse({"ok": False, "error": "ip or base_url required"}, status_code=400)
+            base_url = f"http://{ip}"
+        if not ip:
+            ip = base_url.replace("http://", "").replace("https://", "").split("/")[0].split(":")[0]
+        try:
+            rec = self.registry.upsert(
+                device_id=device_id,
+                base_url=base_url,
+                name=name,
+                fw=fw,
+                coap_host=ip,
+                coap_port=port,
+            )
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        log.info("registered device id=%s coap=%s", rec.id, f"{rec.coap_host}:{rec.coap_port}")
+        return JSONResponse({"ok": True, "device": self.registry.to_public(rec)})
+
+    async def list_devices(self, request: Request) -> JSONResponse:
+        if not _check_token(request):
+            return _unauthorized()
+        return JSONResponse(
+            {"ok": True, "devices": [self.registry.to_public(r) for r in self.registry.list_all()]}
+        )
+
+    async def delete_device(self, request: Request) -> JSONResponse:
+        if not _check_token(request):
+            return _unauthorized()
+        device_id = (request.path_params.get("id") or "").strip()
+        ok = self.registry.remove(device_id)
+        return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
+
+########## mcp_gw/coap_poll.py ##########
+"""瀵规湁 CoAP 鐨勬灑绾藉畾鏃惰蹇収锛汣oAP 澶辫触鍒欒瘯 HTTP /api/data銆傚叏鑷姩锛屼笉濉?IP銆?""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any
+
+import httpx
+
+from . import config
+from .coap_client import DeviceCoapClient
+from .lan_discover import resolve_mdns_hosts, scan_http_hubs
+from .mqtt_ha import HaMqttBridge
+from .registry import DeviceRegistry
+
+log = logging.getLogger("mcp_gw.coap_poll")
+
+
+class CoapSnapshotPoller:
+    def __init__(
+        self,
+        registry: DeviceRegistry,
+        client: DeviceCoapClient,
+        mqtt: HaMqttBridge,
+    ) -> None:
+        self.registry = registry
+        self.client = client
+        self.mqtt = mqtt
+        self._task: asyncio.Task[Any] | None = None
+        self._ok: set[str] = set()
+        self._empty_n = 0
+        self._last_scan = 0.0
+
+    async def start(self) -> None:
+        self._task = asyncio.create_task(self._run(), name="coap-snapshot")
+
+    async def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+    async def _http_data(self, host: str) -> dict[str, Any] | None:
+        url = f"http://{host}/api/data"
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as http:
+                r = await http.get(url)
+                r.raise_for_status()
+                data = r.json()
+            if isinstance(data, dict) and any(
+                k in data for k in ("temp", "temperature", "humidity", "co2", "light", "lux", "sound")
+            ):
+                return data
+            log.warning("HTTP %s 杩斿洖鏃犵幆澧冨瓧娈? %s", url, list(data)[:12] if isinstance(data, dict) else type(data))
+        except Exception as e:
+            log.warning("HTTP 蹇収澶辫触 %s: %s", url, e)
+        return None
+
+    async def _ensure_device_mqtt(self, rec: Any, host: str) -> None:
+        """mDNS TXT 涔嬪锛氬崟鎾?POST /api/wifi action=mqtt锛堜笌鍥轰欢 mqtt_discover_apply 鍚屾锛夈€?""
+        from .device_mqtt import ensure_device_mqtt
+        ok = await ensure_device_mqtt(host)
+        if not ok:
+            log.warning(
+                "id=%s %s MQTT 鍛婄煡澶辫触锛氱儳褰曞惈 action=mqtt 鐨勫浐浠讹紝鎻掍欢 advertise_ip 濉?HA 灞€鍩熺綉 IP",
+                rec.id,
+                host,
+            )
+
+    async def _run(self) -> None:
+        interval = max(5.0, float(config.COAP_POLL_S))
+        log.info("蹇収杞 %.0fs锛氬厛 HTTP /api/data锛堝浐浠剁綉椤垫暟鎹級锛孋oAP 浠呬綔琛ュ厖", interval)
+        await asyncio.sleep(5)
+        while True:
+            hubs = [r for r in self.registry.list_all() if r.has_coap()]
+            if not hubs:
+                self._empty_n += 1
+                now = asyncio.get_running_loop().time()
+                if now - self._last_scan > 45:
+                    self._last_scan = now
+                    log.info("mDNS 灏氭湭鍙戠幇鏋㈢航锛屽紑濮嬭嚜鍔ㄦ壂鎻忓眬鍩熺綉 HTTP /api/data")
+                    await resolve_mdns_hosts(self.registry)
+                    n = await scan_http_hubs(self.registry)
+                    if n:
+                        log.info("鑷姩鎵弿鐧昏 %s 鍙?, n)
+                    hubs = [r for r in self.registry.list_all() if r.has_coap()]
+                if not hubs and (self._empty_n == 1 or self._empty_n % 4 == 0):
+                    log.info(
+                        "灏氭湭鍙戠幇鏋㈢航銆傚凡鍚?mDNS _mcp-sensors锛涚粍鎾笉閫氭椂浼氳嚜鍔ㄦ壂缃戞銆?
+                    )
+            else:
+                self._empty_n = 0
+            for rec in hubs:
+                host, port = rec.coap_endpoint()
+                snap = await self._http_data(host)
+                src = "http"
+                if snap is None:
+                    try:
+                        got = await asyncio.wait_for(
+                            self.client.get_json(host, "/sensors/snapshot", port),
+                            timeout=3.0,
+                        )
+                        if isinstance(got, dict):
+                            snap = got
+                            src = "coap"
+                    except Exception as e:
+                        log.debug("CoAP snapshot 澶辫触 id=%s %s:%s %s", rec.id, host, port, e)
+                if not isinstance(snap, dict):
+                    rec.online = False
+                    rec.last_error = "CoAP/HTTP 鍧囨棤蹇収"
+                    await self.mqtt.publish_liveness(rec.id, False)
+                    log.warning("璇诲揩鐓уけ璐?id=%s %s", rec.id, rec.last_error)
+                    continue
+                rec.touch()
+                rec.last_error = ""
+                rec.online = True
+                await self.mqtt.publish_liveness(rec.id, True)
+                await self.mqtt.publish_snapshot(rec.id, snap)
+                await self._ensure_device_mqtt(rec, host)
+                if rec.id not in self._ok:
+                    self._ok.add(rec.id)
+                    log.info(
+                        "蹇収鎴愬姛 via=%s id=%s %s keys=%s",
+                        src,
+                        rec.id,
+                        host,
+                        list(snap)[:10],
+                    )
+            await asyncio.sleep(interval)
+
+########## mcp_gw/mdns_devices.py ##########
+"""娴忚璁惧 mDNS锛氭湇鍔?_mcp-sensors._udp.local.锛岀鍙ｅ嵆 CoAP 5683銆?
+
+TXT锛歩d锛堝繀濉級銆乿er銆乶ame銆備笉璇绘俯搴︺€?
+闀块┗ AsyncZeroconf锛屼笉鐢ㄦ瘡 8 绉掓柊寤哄啀 sleep銆備紭鍏?IPv4銆?
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any
+
+from .device_mqtt import push_if_missing
+from .registry import DeviceRegistry
+
+log = logging.getLogger("mcp_gw.mdns_dev")
+
+SERVICE = "_mcp-sensors._udp.local."
+
+
+def _ipv4(addrs: list[str]) -> str:
+    for a in addrs:
+        if ":" not in a:
+            return a
+    return addrs[0] if addrs else ""
+
+
+class MdnsDeviceBrowser:
+    def __init__(self, registry: DeviceRegistry) -> None:
+        self.registry = registry
+        self._azc: Any = None
+        self._browser: Any = None
+
+    async def start(self) -> None:
+        try:
+            from zeroconf import ServiceStateChange
+            from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
+        except ImportError:
+            log.warning("zeroconf not installed; skip device browse")
+            return
+
+        self._azc = AsyncZeroconf()
+
+        def on_change(*_args: Any, **kwargs: Any) -> None:
+            # python-zeroconf 鐢ㄥ叧閿瓧 zeroconf= 鍥炶皟锛涙棫鐗堟墠鏄綅缃弬鏁?
+            state_change = kwargs.get("state_change")
+            service_type = kwargs.get("service_type") or ""
+            name = kwargs.get("name") or ""
+            if len(_args) >= 4:
+                state_change = _args[3]
+                service_type = _args[1]
+                name = _args[2]
+            if state_change not in (ServiceStateChange.Added, ServiceStateChange.Updated):
+                return
+            if not service_type or not name:
+                return
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            loop.create_task(self._resolve(service_type, name), name=f"mdns-res-{name}")
+
+        self._browser = AsyncServiceBrowser(
+            self._azc.zeroconf,
+            [SERVICE],
+            handlers=[on_change],
+        )
+        log.info("browsing %s", SERVICE)
+
+    async def stop(self) -> None:
+        if self._browser:
+            try:
+                await self._browser.async_cancel()
+            except Exception:
+                pass
+            self._browser = None
+        if self._azc:
+            try:
+                await self._azc.async_close()
+            except Exception:
+                pass
+            self._azc = None
+
+    async def _resolve(self, service_type: str, name: str) -> None:
+        if not self._azc:
+            return
+        try:
+            from zeroconf.asyncio import AsyncServiceInfo
+        except ImportError:
+            return
+        info = AsyncServiceInfo(service_type, name)
+        await info.async_request(self._azc.zeroconf, 3000)
+        addrs = list(info.parsed_addresses() or [])
+        ip = _ipv4(addrs)
+        if not ip:
+            return
+        props: dict[str, str] = {}
+        for k, v in (info.properties or {}).items():
+            key = k.decode() if isinstance(k, bytes) else str(k)
+            val = v.decode() if isinstance(v, bytes) else ("" if v is None else str(v))
+            props[key] = val
+        did = str(props.get("id") or "").strip().lower()
+        if not did:
+            log.warning("mDNS %s missing TXT id", name)
+            return
+        port = int(info.port or 5683)
+        disp = str(props.get("name") or did)
+        self.registry.upsert(
+            device_id=did,
+            base_url=f"http://{ip}",
+            name=disp,
+            fw=f"{ip}:{port}",
+            coap_host=ip,
+            coap_port=port,
+        )
+        log.info("mDNS hub id=%s coap=%s:%s", did, ip, port)
+        asyncio.create_task(push_if_missing(ip), name=f"mqtt-push-{did}")
+
+########## mcp_gw/config.py ##########
+from __future__ import annotations
+
+import os
+
+
+def _f(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return float(raw)
+
+
+def _i(name: str, default: int) -> int:
+    return int(_f(name, float(default)))
+
+
+def _truthy(name: str, default: str = "0") -> bool:
+    return (os.environ.get(name) or default).strip().lower() in ("1", "true", "yes", "on")
+
+
+HOST = os.environ.get("MCP_GW_HOST", "0.0.0.0").strip() or "0.0.0.0"
+PORT = _i("MCP_GW_PORT", 9080)
+TOKEN = (os.environ.get("MCP_GW_TOKEN") or "").strip()
+STALE_S = _f("MCP_GW_STALE_S", 90.0)
+DEVICE_TIMEOUT_S = _f("MCP_GW_DEVICE_TIMEOUT_S", 15.0)
+
+# mDNS锛氬箍鎾?_voice-ws / _mcp-gw TXT mqtt=锛涙祻瑙堣澶囪蛋 _mcp-sensors._udp
+MDNS_ENABLE = (os.environ.get("MCP_GW_MDNS", "1").strip().lower() not in ("0", "false", "no", "off"))
+ADVERTISE_IP = (os.environ.get("MCP_GW_ADVERTISE_IP") or "").strip()
+
+VOICE_WS_PORT = _i("MCP_GW_VOICE_WS_PORT", 8765)
+VOICE_WS_PATH = (os.environ.get("MCP_GW_VOICE_WS_PATH") or "/ws").strip() or "/ws"
+if not VOICE_WS_PATH.startswith("/"):
+    VOICE_WS_PATH = "/" + VOICE_WS_PATH
+
+# 宸ュ叿/璧勬簮鍚嶅墠缂€锛歿device_id}__{native}
+TOOL_SEP = "__"
+
+PROTOCOL_VERSION = "2025-03-26"
+SERVER_NAME = "mcp-sensors-gw"
+SERVER_VERSION = "0.5.0"
+
+# 璁㈣澶囦簨浠躲€傜敱鏈?App 浠ｅ彂 homeassistant/.../config锛屽皬鐧戒笉蹇呮嫹鑷畾涔夐泦鎴愩€?
+MQTT_HOST = (os.environ.get("MQTT_HOST") or "").strip()
+MQTT_PORT = _i("MQTT_PORT", 1883)
+MQTT_USER = (os.environ.get("MQTT_USER") or "").strip()
+MQTT_PASSWORD = (os.environ.get("MQTT_PASSWORD") or "").strip()
+MQTT_PREFIX = (os.environ.get("MQTT_PREFIX") or "mcp_sensors").strip() or "mcp_sensors"
+MQTT_CLIENT_ID = (os.environ.get("MQTT_CLIENT_ID") or "mcp-sensors-gw").strip() or "mcp-sensors-gw"
+MQTT_ENABLE = bool(MQTT_HOST) and _truthy("MQTT_ENABLE", "1")
+MQTT_DISCOVERY = _truthy("MQTT_DISCOVERY", "1")
+COAP_POLL_S = _f("COAP_POLL_S", 15.0)
+# 缁欒澶囩湅鐨?broker 涓绘満锛涚姝?127.0.0.1锛堣澶囪繛鐨勬槸鑷繁锛屼笉鏄?HA锛?
+MQTT_ADVERTISE_HOST = (os.environ.get("MQTT_ADVERTISE_HOST") or "").strip()
+
+########## mcp_gw/mdns_advertise.py ##########
+"""缃戝叧鑷繁鐨?mDNS 骞挎挱锛堜笉鏄澶?_mcp-sensors锛夈€?
+
+_mcp-gw._tcp : MCP_GW_PORT
+  TXT ws/mqtt/ver 鈥斺€?ws= 闊抽鍥為€€锛沵qtt= 浜嬩欢 broker銆備笉瑕佸浼犳劅鍣ㄣ€佷笉瑕?path/mcp銆?
+_voice-ws._tcp : VOICE_WS_PORT
+  璁惧浼樺厛 browse 姝ら」鎷?PCM 瀵圭銆備粛鏄?WS 鏈嶅姟绔湪鏈満/HA锛岃澶囧綋瀹㈡埛绔€?
+"""
+
+from __future__ import annotations
+
+import logging
+import socket
+from typing import Any
+
+from . import config
+
+log = logging.getLogger("mcp_gw.mdns")
+
+SERVICE_TYPE = "_mcp-gw._tcp.local."
+SERVICE_NAME = f"{config.SERVER_NAME}.{SERVICE_TYPE}"
+
+
+def _is_loopback(host: str) -> bool:
+    h = (host or "").strip().lower()
+    if h.startswith("mqtt://"):
+        h = h[7:]
+    elif h.startswith("mqtts://"):
+        h = h[8:]
+    h = h.split("/")[0]
+    if h.startswith("["):
+        h = h.split("]")[0].lstrip("[")
+    else:
+        h = h.split(":")[0]
+    return (not h) or h in ("127.0.0.1", "localhost", "0.0.0.0", "::1") or h.startswith("127.")
+
+
+def guess_lan_ip() -> str:
+    forced = (config.ADVERTISE_IP or "").strip()
+    if forced and not _is_loopback(forced):
+        return forced
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        if ip and not _is_loopback(ip):
+            return ip
+    except Exception:
+        pass
+    finally:
+        s.close()
+    return ""
+
+
+class MdnsAdvertiser:
+    """asyncio 鍙嬪ソ鐨?mDNS 骞挎挱锛堥厤鍚?uvicorn锛夈€?""
+
+    def __init__(self) -> None:
+        self._azc: Any = None
+        self._info: Any = None
+        self._voice_info: Any = None
+        self.ip = ""
+        self.mqtt_uri = ""
+        self.enabled = False
+        self.last_error = ""
+
+    async def start(self) -> bool:
+        if not config.MDNS_ENABLE:
+            log.info("mDNS advertise disabled")
+            return False
+        try:
+            from zeroconf import ServiceInfo
+            from zeroconf.asyncio import AsyncZeroconf
+        except ImportError:
+            self.last_error = "zeroconf not installed"
+            log.warning("%s; skip mDNS advertise", self.last_error)
+            return False
+
+        self.ip = guess_lan_ip()
+        if not self.ip:
+            self.last_error = "no LAN IP for _mcp-gw (set MCP_GW_ADVERTISE_IP / advertise_ip)"
+            log.error("%s", self.last_error)
+            return False
+        voice_ws = f"ws://{self.ip}:{config.VOICE_WS_PORT}{config.VOICE_WS_PATH}"
+        raw_mqtt = (config.MQTT_HOST or "").strip()
+        mqtt_uri = ""
+        if raw_mqtt or self.ip:
+            host = self.ip if (not raw_mqtt or _is_loopback(raw_mqtt)) else raw_mqtt
+            if host.startswith("mqtt://"):
+                host = host[7:].split("/")[0].split(":")[0]
+            if _is_loopback(host):
+                log.error("refuse mqtt= 127.0.0.1; set advertise_ip to HA/缃戝叧灞€鍩熺綉 IP")
+            else:
+                mqtt_uri = f"mqtt://{host}:{int(config.MQTT_PORT or 1883)}"
+        self.mqtt_uri = mqtt_uri
+        props = {
+            b"ws": voice_ws.encode("utf-8"),
+            b"ver": b"1",
+        }
+        if mqtt_uri:
+            props[b"mqtt"] = mqtt_uri.encode("utf-8")
+            user = (config.MQTT_USER or "").strip()
+            pw = (config.MQTT_PASSWORD or "").strip()
+            if user:
+                props[b"mqtt_user"] = user.encode("utf-8")
+            if pw:
+                props[b"mqtt_pass"] = pw.encode("utf-8")
+        try:
+            info = ServiceInfo(
+                SERVICE_TYPE,
+                SERVICE_NAME,
+                addresses=[socket.inet_aton(self.ip)],
+                port=int(config.PORT),
+                properties=props,
+                server=f"{config.SERVER_NAME}.local.",
+            )
+            azc = AsyncZeroconf()
+            await azc.async_register_service(info)
+            # 璁惧浼樺厛 browse _voice-ws锛汿XT 鍙┖锛岀鍙ｅ嵆 WS銆傜姝㈠湪姝ゅ浼犳劅鍣?JSON銆?
+            voice_info = ServiceInfo(
+                "_voice-ws._tcp.local.",
+                f"mcp-sensors-voice._voice-ws._tcp.local.",
+                addresses=[socket.inet_aton(self.ip)],
+                port=int(config.VOICE_WS_PORT),
+                properties={
+                    b"ws": voice_ws.encode("utf-8"),
+                    b"path": config.VOICE_WS_PATH.encode("utf-8"),
+                },
+                server=f"{config.SERVER_NAME}-voice.local.",
+            )
+            await azc.async_register_service(voice_info)
+            self._azc = azc
+            self._info = info
+            self._voice_info = voice_info
+            self.enabled = True
+            self.last_error = ""
+            log.info(
+                "mDNS advertised %s and _voice-ws at %s voice=%s mqtt=%s",
+                SERVICE_NAME,
+                self.ip,
+                voice_ws,
+                mqtt_uri or "-",
+            )
+            return True
+        except Exception as e:
+            self.last_error = str(e)
+            log.exception("mDNS advertise failed")
+            await self.stop()
+            return False
+
+    async def stop(self) -> None:
+        if self._azc and self._info:
+            try:
+                await self._azc.async_unregister_service(self._info)
+            except Exception:
+                pass
+        if self._azc and self._voice_info:
+            try:
+                await self._azc.async_unregister_service(self._voice_info)
+            except Exception:
+                pass
+        self._voice_info = None
+        if self._azc:
+            try:
+                await self._azc.async_close()
+            except Exception:
+                pass
+        self._azc = None
+        self._info = None
+        self.enabled = False
+
+    def status(self) -> dict:
+        voice = ""
+        if self.ip:
+            voice = f"ws://{self.ip}:{config.VOICE_WS_PORT}{config.VOICE_WS_PATH}"
+        return {
+            "enabled": self.enabled,
+            "service": SERVICE_TYPE.rstrip("."),
+            "name": config.SERVER_NAME,
+            "ip": self.ip,
+            "port": config.PORT,
+            "voice_ws": voice,
+            "mqtt": self.mqtt_uri,
+            "last_error": self.last_error,
+        }
+
+########## run.sh ##########
+#!/usr/bin/with-contenv bash
+# with-contenv锛氭妸 s6 閲岀殑 SUPERVISOR_TOKEN 娉ㄥ叆鏈剼鏈€?
+# 鑻ヤ粛鐢?#!/bin/bash锛岃闊宠繘绋嬭涓嶅埌浠ょ墝锛孉ssist 浼氭挱鎶ャ€岃繕涓嶈兘璁块棶銆嶃€?
+set -euo pipefail
+
+if [[ -z "${SUPERVISOR_TOKEN:-}" ]]; then
+  for f in \
+    /var/run/s6/container_environment/SUPERVISOR_TOKEN \
+    /run/s6/container_environment/SUPERVISOR_TOKEN
+  do
+    if [[ -f "$f" ]]; then
+      SUPERVISOR_TOKEN="$(tr -d '\n\r' < "$f")"
+      export SUPERVISOR_TOKEN
+      break
+    fi
+  done
+fi
+
+python3 - <<'PY'
+import json, os, shlex
+from pathlib import Path
+
+opts = {}
+p = Path("/data/options.json")
+if p.is_file():
+    opts = json.loads(p.read_text(encoding="utf-8"))
+
+def g(key, default=""):
+    v = opts.get(key, default)
+    return "" if v is None else str(v)
+
+def from_s6(name: str) -> str:
+    for base in (
+        Path("/var/run/s6/container_environment"),
+        Path("/run/s6/container_environment"),
+    ):
+        f = base / name
+        if f.is_file():
+            return f.read_text(encoding="utf-8").strip()
+    return ""
+
+def from_proc1(name: str) -> str:
+    try:
+        raw = Path("/proc/1/environ").read_bytes()
+    except OSError:
+        return ""
+    for item in raw.split(b"\0"):
+        if item.startswith(name.encode() + b"="):
+            return item.split(b"=", 1)[1].decode("utf-8", "replace").strip()
+    return ""
+
+sup = (
+    os.environ.get("SUPERVISOR_TOKEN")
+    or os.environ.get("HASSIO_TOKEN")
+    or from_s6("SUPERVISOR_TOKEN")
+    or from_s6("HASSIO_TOKEN")
+    or from_proc1("SUPERVISOR_TOKEN")
+    or from_proc1("HASSIO_TOKEN")
+    or ""
+).strip()
+manual = g("ha_token").strip()
+# 闀挎湡浠ょ墝鍙敤浜?Core :8123锛涗笉瑕佹嬁瀹冨幓鎵?Supervisor 浠ｇ悊锛堜細 401锛?
+ha_url = g("ha_url").strip()
+if not ha_url:
+    adv = g("advertise_ip").strip()
+    if manual and adv:
+        # 涓庢祻瑙堝櫒鎵撳紑 HA 鐨勫湴鍧€涓€鑷达紱寰堝 HAOS 鏄?80 鑰屼笉鏄?8123
+        ha_url = f"http://{adv}"
+    elif manual:
+        ha_url = "http://127.0.0.1"
+    else:
+        ha_url = "http://supervisor/core"
+
+mqtt_raw = g("mqtt_host").strip()
+adv = g("advertise_ip").strip()
+loopback = mqtt_raw.lower() in ("127.0.0.1", "localhost", "0.0.0.0", "::1", "")
+# App 鍦?host 缃戠粶閲屽彲浠ヨ繛 127.0.0.1锛涜澶囩粷瀵逛笉鑳界敤杩欎釜鍦板潃
+mqtt_connect = "127.0.0.1" if loopback else mqtt_raw
+mqtt_advertise = adv if loopback else (mqtt_raw or adv)
+if loopback:
+    print(
+        "[haos_app] MQTT 濉簡 127.0.0.1/鐣欑┖锛氫粎鏈?App 杩?Mosquitto銆?
+        "璁惧灏嗕娇鐢ㄥ眬鍩熺綉 IP 骞挎挱 mqtt=锛涜纭 advertise_ip 宸插～锛堝 192.168.1.210锛?
+    )
+    if not adv:
+        print(
+            "[haos_app] 鏈～灞€鍩熺綉 IP锛歮DNS 鍙兘骞挎挱 127.0.0.1锛岃澶囨棤娉曚笂鎶ヤ簨浠?
+        )
+if mqtt_advertise.lower() in ("127.0.0.1", "localhost"):
+    print("[haos_app] 閿欒锛氱粰璁惧鐨?MQTT 鍦板潃浠嶆槸 127.0.0.1锛屼簨浠朵笂鎶ヤ細澶辫触")
+
+env = {
+    "MCP_GW_HOST": "0.0.0.0",
+    "MCP_GW_PORT": "9080",
+    "MCP_GW_MDNS": "1",
+    "MCP_GW_VOICE_WS_PORT": "8765",
+    "MCP_GW_VOICE_WS_PATH": "/ws",
+    "MQTT_ENABLE": "1",
+    "MQTT_HOST": mqtt_connect,
+    "MQTT_PORT": g("mqtt_port", "1883"),
+    "MQTT_USER": g("mqtt_user"),
+    "MQTT_PASSWORD": g("mqtt_password"),
+    "MQTT_PREFIX": g("mqtt_prefix", "mcp_sensors"),
+    "MQTT_CLIENT_ID": "mcp-sensors-gw",
+    "MQTT_DISCOVERY": "1",
+    "MQTT_ADVERTISE_HOST": mqtt_advertise,
+    "MCP_GW_ADVERTISE_IP": adv,
+    "DASHSCOPE_API_KEY": g("dashscope_api_key"),
+    "HA_LANGUAGE": g("language", "zh-CN"),
+    "HA_AGENT_ID": g("conversation_agent"),
+    "HA_URL": ha_url,
+    "HA_LLAT": manual,
+    "TTS_VOICE": g("tts_voice", "longanyang"),
+    "TTS_VOLUME": g("tts_volume", "100"),
+    "USE_STREAM_TTS": "0",
+}
+
+print(
+    f"[haos_app] HA_URL={ha_url} supervisor_len={len(sup)} llat_len={len(manual)}"
+)
+if not g("mqtt_user") and not g("mqtt_password"):
+    print("[haos_app] MQTT 鐢ㄦ埛/瀵嗙爜涓虹┖锛氳嫢 Mosquitto 瑕佹眰鐧诲綍浼氬嚭鐜?Not authorized (135)")
+lines = [f"{k}={shlex.quote(v)}" for k, v in env.items()]
+Path("/app/.env").write_text("\n".join(lines) + "\n", encoding="utf-8")
+print("[haos_app] wrote /app/.env")
+PY
+
+set -a
+# shellcheck disable=SC1091
+. /app/.env
+set +a
+# .env 涓嶈瑕嗙洊 Supervisor 鍐呴儴浠ょ墝
+if [[ -z "${SUPERVISOR_TOKEN:-}" ]]; then
+  for f in \
+    /var/run/s6/container_environment/SUPERVISOR_TOKEN \
+    /run/s6/container_environment/SUPERVISOR_TOKEN
+  do
+    if [[ -f "$f" ]]; then
+      export SUPERVISOR_TOKEN="$(tr -d '\n\r' < "$f")"
+      break
+    fi
+  done
+fi
+
+export PYTHONPATH="/app:${PYTHONPATH:-}"
+
+echo "[haos_app] start mcp_gw :${MCP_GW_PORT:-9080}"
+python3 -u -m mcp_gw >>/proc/1/fd/1 2>>/proc/1/fd/2 &
+GW_PID=$!
+
+VOICE_PID=""
+if [[ -n "${DASHSCOPE_API_KEY:-}" ]]; then
+  echo "[haos_app] start voice-bridge :8765 (Assist, no Hermes)"
+  python3 -u /app/voice/bridge.py >>/proc/1/fd/1 2>>/proc/1/fd/2 &
+  VOICE_PID=$!
+else
+  echo "[haos_app] skip voice-bridge: 鏈厤缃?dashscope_api_key锛坢cp_gw 浠嶈繍琛岋級"
+fi
+
+term() {
+  kill "$GW_PID" ${VOICE_PID:+$VOICE_PID} 2>/dev/null || true
+  wait || true
+}
+trap term INT TERM
+
+if [[ -n "$VOICE_PID" ]]; then
+  wait -n "$GW_PID" "$VOICE_PID"
+else
+  wait "$GW_PID"
+fi
+status=$?
+echo "[haos_app] a process exited status=${status}"
+term
+exit "${status}"
+
+########## sync_sources.sh ##########
+#!/usr/bin/env bash
+# 浠庢闈?server_stack 鍚屾婧愮爜鍒版湰 App 鐩綍锛堜笉鍚?venv锛?
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+STACK="${HERE}/../server_stack"
+mkdir -p "${HERE}/mcp_gw" "${HERE}/voice"
+cp -a "${STACK}/mcp_gw/mcp_gw/"*.py "${HERE}/mcp_gw/"
+cp -a "${STACK}/voice-bridge/bridge.py" "${HERE}/voice/bridge.py"
+echo "宸蹭粠 ${STACK} 澶嶅埗 mcp_gw 涓?bridge.py銆?
+echo "娉ㄦ剰锛歷oice/bridge.py 鑻ヨ HA Assist 琛ヤ竵瑕嗙洊锛岃閲嶆柊搴旂敤 ha_assist 瀵规帴锛屽嬁鐩存帴瑕嗙洊涓㈠け ask_ha銆?

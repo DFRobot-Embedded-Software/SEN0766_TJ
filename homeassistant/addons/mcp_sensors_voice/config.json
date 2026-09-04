@@ -1,0 +1,16 @@
+{
+  "name": "MCP Sensors Voice WS",
+  "version": "1.0.0",
+  "slug": "mcp_sensors_voice",
+  "description": "设备音频 WebSocket 服务端（与 voice-bridge 同一协议）。不是 Wyoming，不传传感器。",
+  "arch": ["amd64", "aarch64"],
+  "startup": "services",
+  "boot": "auto",
+  "host_network": true,
+  "options": {
+    "bridge_port": 8765
+  },
+  "schema": {
+    "bridge_port": "int"
+  }
+}

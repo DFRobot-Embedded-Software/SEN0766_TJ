@@ -1,6 +1,6 @@
 /**
  * @file board_snapshot.h
- * @brief 组合 env_sensors + radar_area，供 Web /api/data 与 MCP env provider 共用
+ * @brief 组合 env_sensors + radar_area，供 Web /api/data 与 CoAP GET /sensors/snapshot 共用
  */
 #pragma once
 
@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-/** @brief 传感器快照，对应 GET /api/data 与 MCP sensors.get_snapshot */
+/** @brief 传感器快照，对应 GET /api/data 与 CoAP GET /sensors/snapshot */
 typedef struct {
     bool env_ready;
     float temperature;

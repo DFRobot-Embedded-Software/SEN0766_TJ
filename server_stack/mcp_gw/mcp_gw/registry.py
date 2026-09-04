@@ -10,19 +10,25 @@ from typing import Any, Optional
 class DeviceRecord:
     id: str
     base_url: str
-    mcp_path: str = "/mcp_server"
     name: str = ""
     fw: str = ""
+    coap_host: str = ""
+    coap_port: int = 5683
     last_seen: float = field(default_factory=time.time)
     online: bool = True
-    tools: list[dict[str, Any]] = field(default_factory=list)
-    resources: list[dict[str, Any]] = field(default_factory=list)
     last_error: str = ""
+    event_cache: list[dict[str, Any]] = field(default_factory=list)
 
-    @property
-    def mcp_url(self) -> str:
-        path = self.mcp_path if self.mcp_path.startswith("/") else f"/{self.mcp_path}"
-        return f"{self.base_url.rstrip('/')}{path}"
+    def coap_endpoint(self) -> tuple[str, int]:
+        if self.coap_host:
+            return self.coap_host, int(self.coap_port or 5683)
+        host = self.base_url.replace("http://", "").replace("https://", "").split("/")[0]
+        host = host.split(":")[0]
+        return host, int(self.coap_port or 5683)
+
+    def has_coap(self) -> bool:
+        host = (self.coap_host or "").strip()
+        return bool(host) and host not in ("0.0.0.0", "::")
 
     def touch(self) -> None:
         self.last_seen = time.time()
@@ -42,9 +48,10 @@ class DeviceRegistry:
         *,
         device_id: str,
         base_url: str,
-        mcp_path: str = "/mcp_server",
         name: str = "",
         fw: str = "",
+        coap_host: str = "",
+        coap_port: int = 5683,
     ) -> DeviceRecord:
         device_id = (device_id or "").strip().lower()
         if not device_id:
@@ -52,9 +59,8 @@ class DeviceRegistry:
         base_url = (base_url or "").strip().rstrip("/")
         if not base_url.startswith("http://") and not base_url.startswith("https://"):
             raise ValueError("base_url must be http(s) URL")
-        mcp_path = (mcp_path or "/mcp_server").strip() or "/mcp_server"
-        if not mcp_path.startswith("/"):
-            mcp_path = "/" + mcp_path
+        host = (coap_host or "").strip()
+        port = int(coap_port or 5683)
 
         with self._lock:
             rec = self._devices.get(device_id)
@@ -62,21 +68,48 @@ class DeviceRegistry:
                 rec = DeviceRecord(
                     id=device_id,
                     base_url=base_url,
-                    mcp_path=mcp_path,
                     name=(name or "").strip(),
                     fw=(fw or "").strip(),
+                    coap_host=host,
+                    coap_port=port,
                 )
                 self._devices[device_id] = rec
             else:
                 rec.base_url = base_url
-                rec.mcp_path = mcp_path
+                if host:
+                    rec.coap_host = host
+                rec.coap_port = port
                 if name:
                     rec.name = name.strip()
                 if fw:
                     rec.fw = fw.strip()
-                rec.touch()
-                rec.last_error = ""
+            rec.touch()
+            rec.last_error = ""
             return rec
+
+    def ensure_mqtt_device(self, device_id: str) -> DeviceRecord:
+        """叶子可无 mDNS：仅凭 MQTT topic 进表。无 CoAP 地址则不能 GET/PUT。"""
+        rec = self.get(device_id)
+        if rec is not None:
+            rec.touch()
+            return rec
+        return self.upsert(
+            device_id=device_id,
+            base_url="http://0.0.0.0",
+            name=device_id,
+            coap_host="",
+            coap_port=5683,
+        )
+
+    def append_event(self, device_id: str, event: dict[str, Any], max_keep: int = 64) -> None:
+        with self._lock:
+            rec = self._devices.get((device_id or "").strip().lower())
+            if not rec:
+                return
+            rec.event_cache.append(event)
+            if len(rec.event_cache) > max_keep:
+                rec.event_cache = rec.event_cache[-max_keep:]
+            rec.touch()
 
     def remove(self, device_id: str) -> bool:
         with self._lock:
@@ -91,47 +124,9 @@ class DeviceRegistry:
             return list(self._devices.values())
 
     def list_online(self) -> list[DeviceRecord]:
-        now = time.time()
+        """在线名单。不再用 last_seen 超时把枢纽打成离线：mDNS 不会每 90 秒刷新。"""
         with self._lock:
-            out: list[DeviceRecord] = []
-            for rec in self._devices.values():
-                if rec.online and (now - rec.last_seen) <= self._stale_s:
-                    out.append(rec)
-                elif (now - rec.last_seen) > self._stale_s:
-                    rec.online = False
-            return out
-
-    def set_tools(self, device_id: str, tools: list[dict[str, Any]], error: str = "") -> None:
-        self.set_catalog(device_id, tools=tools, resources=None, error=error)
-
-    def set_resources(self, device_id: str, resources: list[dict[str, Any]]) -> None:
-        with self._lock:
-            rec = self._devices.get((device_id or "").strip().lower())
-            if not rec:
-                return
-            rec.resources = resources
-
-    def set_catalog(
-        self,
-        device_id: str,
-        *,
-        tools: list[dict[str, Any]] | None = None,
-        resources: list[dict[str, Any]] | None = None,
-        error: str = "",
-    ) -> None:
-        with self._lock:
-            rec = self._devices.get((device_id or "").strip().lower())
-            if not rec:
-                return
-            if tools is not None:
-                rec.tools = tools
-            if resources is not None:
-                rec.resources = resources
-            rec.last_error = error
-            if not error:
-                rec.touch()
-            else:
-                rec.online = False
+            return [rec for rec in self._devices.values() if rec.online]
 
     def mark_error(self, device_id: str, error: str) -> None:
         with self._lock:
@@ -139,21 +134,16 @@ class DeviceRegistry:
             if not rec:
                 return
             rec.last_error = error
-            rec.online = False
 
     def to_public(self, rec: DeviceRecord) -> dict[str, Any]:
-        now = time.time()
-        stale = (now - rec.last_seen) > self._stale_s
         return {
             "id": rec.id,
             "name": rec.name or rec.id,
-            "base_url": rec.base_url,
-            "mcp_path": rec.mcp_path,
-            "mcp_url": rec.mcp_url,
+            "host": rec.coap_host or rec.base_url,
+            "coap": f"{rec.coap_host}:{rec.coap_port}" if rec.coap_host else "",
             "fw": rec.fw,
-            "online": rec.online and not stale,
+            "online": rec.online,
             "last_seen": rec.last_seen,
-            "tool_count": len(rec.tools),
-            "resource_count": len(rec.resources),
             "last_error": rec.last_error,
+            "has_coap": rec.has_coap(),
         }

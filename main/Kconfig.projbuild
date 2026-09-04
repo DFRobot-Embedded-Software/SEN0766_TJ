@@ -11,6 +11,17 @@
 #   RMT   ── WS2812
 #
 
+menu "0. 设备角色"
+
+    config COMM_ROLE_LEAF
+        bool "电池叶子（裁常驻 CoAP / mDNS / 仪表盘 / WS）"
+        default n
+        help
+            同一套 MQTT topic mcp_sensors/<id>/event。醒时短连 broker 发完即断。
+            不实现常驻 CoAP。深睡状态机由板级自行接。枢纽请保持本项关闭。
+
+endmenu
+
 menu "1. 板级总线与传感器"
 
     comment "I2C0：环境传感器共用总线（STCC4 / LTR-303 / SC7A20H）"
@@ -526,15 +537,17 @@ menu "3. 音频算法 (YAMNet / 唤醒 / 透传)"
     menu "WebSocket PCM 客户端（连网关）"
         config AUDIO_WS_ENABLE
             bool "启用"
-            depends on YAMNET_ENABLE
+            depends on YAMNET_ENABLE && !COMM_ROLE_LEAF
             default n
             help
-                设备作为 WebSocket 客户端连接网关，上行麦克风、下行播放。
+                枢纽：设备作为 WebSocket 客户端。叶子角色无常驻 WS。
 
         config AUDIO_WS_URI
-            string "网关 URI"
+            string "语音 WS 回退 URI（空=只信 mDNS）"
             depends on AUDIO_WS_ENABLE
-            default "ws://192.168.1.27:8765/ws"
+            default ""
+            help
+                正常由 _voice-ws 或 _mcp-gw TXT ws= 告知。仅无 mDNS 时才填 ws://ip:8765/ws。
 
         config AUDIO_WS_AUTH_HEADER
             string "可选 Authorization 头完整行（空=不鉴权）"
@@ -638,44 +651,50 @@ menu "4. 设备事件"
 
 endmenu
 
-menu "5. MCP 聚合网关 (mcp_gw)"
+menu "5. 设备通信框架 (CoAP / MQTT / mDNS)"
 
-    config MCP_GW_CLIENT_ENABLE
-        bool "联网后自动向 mcp_gw 注册"
-        default y
+    config MQTT_BROKER_URI
+        string "MQTT 回退 URI（空=只信 _mcp-gw TXT mqtt=）"
+        default ""
         help
-            WiFi 连接且本机 MCP 启动后，POST 注册到聚合网关，并周期性心跳。
-            爱马仕只需配置网关上的唯一 MCP 入口，无需为每台设备手写 URL。
+            留空。Broker 只由网关/HA 插件广播的 _mcp-gw TXT mqtt= 告知。
+            不要填家里 IP。MQTT 不负责发现设备。
 
-    config MCP_GW_REGISTER_URL
-        string "注册 URL（mDNS 失败时回退）"
-        depends on MCP_GW_CLIENT_ENABLE
-        default "http://192.168.0.73:9080/api/devices/register"
-        help
-            完整路径。优先用 mDNS 发现时，本项仅作回退。
-
-    config MCP_GW_MDNS_DISCOVER
-        bool "用 mDNS 自动发现聚合网关"
-        depends on MCP_GW_CLIENT_ENABLE
-        default y
-        help
-            browse 局域网 _mcp-gw._tcp，从 TXT path 拼出注册 URL。
-            网关进程需开启 MCP_GW_MDNS=1（默认）。
-
-    config MCP_GW_TOKEN
-        string "可选 X-MCP-GW-Token（空=不鉴权）"
-        depends on MCP_GW_CLIENT_ENABLE
+    config MQTT_USERNAME
+        string "MQTT 用户名（可空）"
         default ""
 
-    config MCP_GW_DEVICE_NAME
-        string "设备显示名（空=仅用 MAC 短 id）"
-        depends on MCP_GW_CLIENT_ENABLE
+    config MQTT_PASSWORD
+        string "MQTT 密码（可空）"
         default ""
 
-    config MCP_GW_HEARTBEAT_S
-        int "心跳间隔 (秒)"
-        depends on MCP_GW_CLIENT_ENABLE
-        default 30
-        range 10 600
+    config COMM_IDENTIFY_BTN_ENABLE
+        bool "长按按键打开查地址临时 AP"
+        default y
+        help
+            天花板安装后不靠串口：长按开 MCP-Sensors-Find，打开 http://192.168.4.1/identify。
+
+    config COMM_IDENTIFY_GPIO
+        int "查地址按键 GPIO"
+        depends on COMM_IDENTIFY_BTN_ENABLE
+        default 9
+        range 0 54
+
+    config COMM_IDENTIFY_ACTIVE_LOW
+        bool "按键按下为低电平（内部上拉）"
+        depends on COMM_IDENTIFY_BTN_ENABLE
+        default y
+
+    config COMM_IDENTIFY_HOLD_MS
+        int "长按时间 (ms)"
+        depends on COMM_IDENTIFY_BTN_ENABLE
+        default 1500
+        range 500 8000
+
+    config COMM_IDENTIFY_AP_S
+        int "临时 AP 超时 (秒)"
+        depends on COMM_IDENTIFY_BTN_ENABLE
+        default 180
+        range 30 600
 
 endmenu

@@ -9,16 +9,6 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 1.7.19~2
-  espressif/cmake_utilities:
-    component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
-    dependencies:
-    - name: idf
-      require: private
-      version: '>=4.1'
-    source:
-      registry_url: https://components.espressif.com
-      type: service
-    version: 0.5.3
   espressif/dl_fft:
     component_hash: a955ca29581de2177ddf25759273bd83f082b3c805e735fe6ee105858643989b
     dependencies:
@@ -30,7 +20,7 @@ dependencies:
       type: service
     version: 0.6.0
   espressif/eppp_link:
-    component_hash: 04f7f31868b8ae6014c96132740a192d09611a6e46aaa7038c865ffc7e26b38f
+    component_hash: c1369b37f2b0b427b198ae14e07e7547d3da92b95fe4dc7f949e5de560b35f21
     dependencies:
     - name: espressif/esp_serial_slave_link
       registry_url: https://components.espressif.com
@@ -42,7 +32,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 1.1.5
+    version: 1.1.6
   espressif/esp-dsp:
     component_hash: 12e44db246517a627bc0fe2b255b8335410c0215c98bfba2df5a8e3edea839ef
     dependencies:
@@ -54,15 +44,15 @@ dependencies:
       type: service
     version: 1.8.0
   espressif/esp-nn:
-    component_hash: d341d40c8a135158f2bd47bd3c956bb8eda43358cd555cd887b410310a14c547
+    component_hash: 83eca824ef501eb0d8ac7d090970d8a2997ac369e5edb86366a5943e4368d5a5
     dependencies:
     - name: idf
       require: private
-      version: '>=4.2'
+      version: '>=5.1'
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 1.2.5
+    version: 1.3.0
   espressif/esp-sr:
     component_hash: 809d0041cdddd98a278f0d5afef7bb60a451290577b98cf718dfffc91bdcbd9b
     dependencies:
@@ -169,24 +159,6 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 2.5.5
-  espressif/mcp-c-sdk:
-    component_hash: 58252f2ca194794f11aff0ff559b6c16cc57c0838d99558011c2f95eeae87e00
-    dependencies:
-    - name: espressif/cmake_utilities
-      registry_url: https://components.espressif.com
-      require: private
-      version: 0.*
-    - name: espressif/cjson
-      registry_url: https://components.espressif.com
-      require: private
-      version: 1.*
-    - name: idf
-      require: private
-      version: '>=5.4'
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 2.0.1
   espressif/mdns:
     component_hash: 291732b5df4d181eb75eba9042799a508c4c124503a0c0573132a0a48d2e3fbe
     dependencies:
@@ -224,9 +196,8 @@ direct_dependencies:
 - espressif/esp_websocket_client
 - espressif/esp_wifi_remote
 - espressif/led_strip
-- espressif/mcp-c-sdk
 - espressif/mdns
 - idf
-manifest_hash: 439135ee46cc8e1e465781f067c485c48c0aa8fdb8a3edce633ef6e6fb07e9d1
+manifest_hash: f481be2a4fa6dadd296c194f24178f5c6a4bb5eec5e86f97e4af8ebef6d57e5f
 target: esp32p4
 version: 2.0.0

@@ -11,10 +11,10 @@ static const char *TAG = "mcp_sensors";
 
 #if !CONFIG_YAMNET_VERIFY_ONLY
 #include "esp_sntp.h"
-#include "mdns.h"
-#include "mcp_server.h"
-#include "mcp_gw_client.h"
 #include "board_snapshot.h"
+#include "comm_hub.h"
+#include "device_id.h"
+#include "identify_btn.h"
 #include "ota_update.h"
 #include "web_fs.h"
 #include "web_log.h"
@@ -64,85 +64,66 @@ static void init_time_sync(void)
     ESP_LOGI(TAG, "SNTP started (CST-8) for event timestamps");
 }
 
+static bool s_sta_services;
+
 static void on_wifi_connected(const char *ip_addr)
 {
-    static char s_mdns_id[8];
+    char id[8] = {0};
     char host[32] = "mcp-sensors";
-    char inst[40] = "MCP Sensors";
-    s_mdns_id[0] = '\0';
-    if (mcp_gw_device_id(s_mdns_id, sizeof(s_mdns_id)) == ESP_OK) {
-        snprintf(host, sizeof(host), "mcp-sensors-%s", s_mdns_id);
-        snprintf(inst, sizeof(inst), "MCP Sensors %s", s_mdns_id);
+    (void)device_id_get(id, sizeof(id));
+    if (id[0]) {
+        snprintf(host, sizeof(host), "mcp-sensors-%s", id);
     }
 
     ESP_LOGI(TAG, "boot: phase6 online");
     ESP_LOGI(TAG, "WiFi connected:");
     ESP_LOGI(TAG, "  Web UI: http://%s or http://%s.local", ip_addr, host);
-    ESP_LOGI(TAG, "  MCP:    http://%s:%d%s", ip_addr, MCP_HTTP_PORT, MCP_ENDPOINT_URI);
-    ESP_LOGI(TAG, "  device_id: %s", s_mdns_id[0] ? s_mdns_id : "(unknown)");
+    ESP_LOGI(TAG, "  CoAP:   udp://%s:5683", ip_addr);
+    ESP_LOGI(TAG, "  device_id: %s", id[0] ? id : "(unknown)");
 
     rgb_ui_set_net(RGB_NET_OK);
 
-    mdns_init();
-    mdns_hostname_set(host);
-    mdns_instance_name_set(inst);
-    mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
-    /* 便于同网发现；注册仍以 mcp_gw HTTP 为准 */
-    mdns_txt_item_t mcp_txt[] = {
-        {.key = "path", .value = MCP_ENDPOINT_URI},
-        {.key = "id", .value = s_mdns_id},
-    };
-    mdns_service_add(NULL, "_mcp", "_tcp", MCP_HTTP_PORT, mcp_txt, 2);
-
+    /* 不要每次 GOT_IP 都拆 comm_hub：MQTT wait 任务会被停掉且可能起不回来，
+     * 事件卡住直到 App 重启再下发 broker。Wi‑Fi 闪断只让 MQTT 客户端自重连。 */
+    if (!s_sta_services) {
+        esp_err_t err = comm_hub_start();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "comm hub start failed: %s", esp_err_to_name(err));
+        } else {
+            s_sta_services = true;
+        }
+    }
     init_time_sync();
 
     web_server_stop();
-    mcp_server_stop();
-#if CONFIG_MCP_GW_CLIENT_ENABLE
-    mcp_gw_client_stop();
-#endif
 
-    esp_err_t err = mcp_server_start();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "MCP server start failed: %s", esp_err_to_name(err));
-        return;
-    }
-    ESP_LOGI(TAG, "MCP server up, starting mcp_gw client (if enabled)");
-
-#if CONFIG_MCP_GW_CLIENT_ENABLE
-    /* 不依赖 Web 仪表盘；MCP 起来即可向聚合网关注册 */
-    err = mcp_gw_client_start(ip_addr);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "mcp_gw client start failed: %s", esp_err_to_name(err));
-    }
-#endif
-
-    err = web_server_start_dashboard();
+#if !CONFIG_COMM_ROLE_LEAF
+    esp_err_t err = web_server_start_dashboard();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "web server start failed: %s", esp_err_to_name(err));
-        /* MCP / mcp_gw 已启动，不因网页失败而停掉 */
     } else {
         err = web_server_register_static_routes();
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "static routes register failed: %s", esp_err_to_name(err));
         }
     }
+#else
+    ESP_LOGI(TAG, "leaf: no STA dashboard; identify AP still available");
+#endif
 
-    /* 联网 + 核心服务均已起来，确认本次（可能是 OTA 后的）固件可用，取消回滚保护 */
     ota_update_mark_valid();
 }
 
 static void on_ap_started(void)
 {
-    /* 失败闪灯会自行切回 AP_WAIT；其它进入 AP 的路径直接显示等待配网 */
+    if (wifi_manager_is_identify_ap()) {
+        return;
+    }
     if (rgb_ui_get_net() != RGB_NET_FAIL) {
         rgb_ui_set_net(RGB_NET_AP_WAIT);
     }
-#if CONFIG_MCP_GW_CLIENT_ENABLE
-    mcp_gw_client_stop();
-#endif
-    mcp_server_stop();
-    mdns_free();
+    comm_hub_stop();
+    s_sta_services = false;
     web_server_stop();
     web_server_start_provision();
 }
@@ -258,7 +239,7 @@ static void boot_env_sound(void)
 void app_main(void)
 {
 #if CONFIG_YAMNET_VERIFY_ONLY
-    ESP_LOGI(TAG, "YAMNet verify-only mode (no WiFi / sensors / MCP / Web)");
+    ESP_LOGI(TAG, "YAMNet verify-only mode (no WiFi / sensors / Web)");
 
     esp_err_t err = ws2812_led_init();
     if (err != ESP_OK) {
@@ -310,6 +291,7 @@ void app_main(void)
         ESP_LOGE(TAG, "wifi init failed: %s", esp_err_to_name(err));
         return;
     }
+    (void)identify_btn_start();
 
 #if CONFIG_YAMNET_ENABLE
     boot_audio();

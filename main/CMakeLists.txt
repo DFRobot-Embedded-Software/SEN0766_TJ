@@ -16,11 +16,15 @@ set(srcs
     "sensor/c4004_sensor.c"
     "events/device_event_bus.c"
     "events/env_event_detector.c"
-    "mcp/core/mcp_core.c"
-    "mcp/providers/mcp_provider_env.c"
-    "mcp/providers/mcp_provider_radar.c"
-    "mcp/mcp_server.c"
-    "mcp/mcp_gw_client.c"
+    "comm/device_id.c"
+    "comm/snapshot_json.c"
+    "comm/coap_hub.c"
+    "comm/mqtt_hub.c"
+    "comm/mqtt_discover.c"
+    "comm/mdns_hub.c"
+    "comm/voice_discover.c"
+    "comm/comm_hub.c"
+    "comm/identify_btn.c"
     "ota/ota_update.c"
     "led/ws2812_led.c"
     "led/ws2812_fx.c"
@@ -75,9 +79,7 @@ idf_component_register(
         "web"
         "sensor"
         "events"
-        "mcp"
-        "mcp/core"
-        "mcp/providers"
+        "comm"
         "ota"
         "led"
         "audio/amp"
@@ -88,8 +90,7 @@ idf_component_register(
         "audio/sound"
     REQUIRES
         nvs_flash esp_wifi esp_wifi_remote esp_hosted esp_event esp_netif
-        esp_http_server esp_http_client spiffs json mdns driver
-        espressif__mcp-c-sdk
+        esp_http_server esp_http_client spiffs json mdns driver mqtt
         esp_timer
         esp_system
         app_update

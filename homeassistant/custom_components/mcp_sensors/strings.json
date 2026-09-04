@@ -1,0 +1,25 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "MCP Sensors hub",
+        "description": "CoAP host (UDP 5683). Entities are created by this integration, not MQTT Discovery.",
+        "data": {
+          "host": "Host",
+          "port": "CoAP port"
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "Add {name}",
+        "description": "Found hub {name} at {host}. Confirm to create entities via CoAP."
+      }
+    },
+    "error": {
+      "cannot_connect": "CoAP GET /id failed"
+    },
+    "abort": {
+      "already_configured": "Device already configured",
+      "no_device_id": "mDNS TXT id missing"
+    }
+  }
+}

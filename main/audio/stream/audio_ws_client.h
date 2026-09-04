@@ -1,8 +1,15 @@
 /**
  * @file audio_ws_client.h
- * @brief 设备作为 WebSocket 客户端：唤醒后上行 PCM，接收下行并播放
+ * @brief 设备 = WebSocket 客户端，只音频。对端可以是 voice-bridge 或 HA 内同类 server。
  *
- * 协议见 README_WS.md。未开启 CONFIG_AUDIO_WS_ENABLE 时为空操作。
+ * 二进制：PCM 16 kHz s16le 单声道。
+ * 文本会话 JSON（op 字段）：
+ *   设备→对端  uplink_start {rate:16000,format:s16le,channels:1}  随后发 PCM
+ *   设备→对端  dialog_idle  本轮结束，下一轮需再唤醒
+ *   对端→设备  play_stop    下行播完，排空 ring 后保持连接
+ * 禁止：在 WS 上传 snapshot、改阈值、雷达坐标、MQTT 事件。哭声走 MQTT。
+ *
+ * 未开 CONFIG_AUDIO_WS_ENABLE 时为空操作（无麦板裁掉即可）。
  */
 #pragma once
 

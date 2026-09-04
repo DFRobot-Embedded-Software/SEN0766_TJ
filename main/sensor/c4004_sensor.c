@@ -146,8 +146,9 @@ static uint8_t s_ghost_mismatch_streak;
 #define CONFIG_C4004_GHOST_RECOVER_COOLDOWN_MS 60000
 #endif
 
-/** UART 请求共用缓冲区，避免 sync/query 在 main 任务栈上分配 ~1.2KB */
+/** UART 请求共用缓冲区，避免 sync/query 在调用方任务栈上分配大包 */
 static c4004_packet_t s_work_packet;
+static c4004_packet_t s_pending_packet;
 #if CONFIG_C4004_AUTO_RECOVER_ENABLE
 static area_config_t s_health_cfg;
 #endif
@@ -408,11 +409,8 @@ static bool request_frame(uint8_t control, uint8_t cmd, const uint8_t *data, uin
     xSemaphoreTake(s_uart_lock, portMAX_DELAY);
 
     /* 先排空已有异步帧（靠近/远离/边界 TAG_REPORT），禁止 flush 丢掉 */
-    {
-        c4004_packet_t pending;
-        while (read_frame(&pending, 5)) {
-            handle_packet(&pending);
-        }
+    while (read_frame(&s_pending_packet, 5)) {
+        handle_packet(&s_pending_packet);
     }
 
     if (!send_command(control, cmd, data, len)) {

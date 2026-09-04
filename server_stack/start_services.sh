@@ -257,7 +257,7 @@ start_mcp_gw() {
     set +a
     nohup ./venv/bin/python -u -m mcp_gw >>"${LOG_DIR}/mcp_gw.log" 2>&1 </dev/null &
   )
-  sleep 2
+  sleep 5
   if is_listening 9080; then
     green "[成功] mcp_gw → http://127.0.0.1:9080"
   else

@@ -1,0 +1,34 @@
+set_thresholds:
+  name: 设置传感器阈值
+  description: CoAP PUT /sensors/thresholds。禁止走 MQTT command。
+  fields:
+    hub_id:
+      name: 设备 id
+      required: true
+      example: a1b2c3
+      selector:
+        text:
+    payload:
+      name: JSON 对象
+      required: true
+      description: 与网页 sensors 对象相同，或外包 sensors 键
+      selector:
+        object:
+
+set_config:
+  name: 设置雷达区域
+  description: CoAP PUT /sensors/config（action JSON）。
+  fields:
+    hub_id:
+      name: 设备 id
+      required: true
+      selector:
+        text:
+    payload:
+      name: action JSON
+      required: true
+      example:
+        action: set_range
+        coords: [[0, 0], [3, 0], [3, 3], [0, 3]]
+      selector:
+        object:

@@ -11,7 +11,6 @@
 | `_tail_mcp_gw.py` | 查看远端 mcp_gw 日志 |
 | `_setup_bridge.py` | 重建远端 venv 后启动 bridge |
 | `_install_hermes.py` | 安装 Hermes + 配置 MCP/API Server |
-| `_bridge_remote/` | 语音 bridge 源码镜像（开发用；正式源在 `server_stack/voice-bridge/`） |
 | `fetch_yamnet_model.ps1` | 下载 YAMNet 权重 |
 | `verify_yamnet_model.ps1` | 校验 YAMNet |
 | `patch_esp_sr_movemodel_utf8.ps1` | ESP-SR 补丁 |

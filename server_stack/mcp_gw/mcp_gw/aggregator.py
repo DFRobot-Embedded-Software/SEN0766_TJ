@@ -10,8 +10,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from . import config
-from .device_bridge import DeviceNotificationBridge, split_public_uri
-from .device_client import DeviceMcpClient
+from .coap_client import DeviceCoapClient
 from .registry import DeviceRegistry
 from .sessions import SessionManager
 
@@ -20,50 +19,64 @@ log = logging.getLogger("mcp_gw.agg")
 GATEWAY_LIST_DEVICES = "gw.list_devices"
 
 
+def split_public_uri(public_uri: str) -> tuple[str, str]:
+    if config.TOOL_SEP not in public_uri:
+        raise ValueError(f"bad public uri: {public_uri}")
+    device_id, native = public_uri.split(config.TOOL_SEP, 1)
+    return device_id.strip().lower(), native
+
+
 class AggregatorMcp:
-    """对 Hermes 暴露的聚合 Streamable HTTP MCP（JSON + GET SSE）。"""
+    """Hermes 只看见本进程 MCP。tools 内部 = CoAP；events 订阅 = MQTT。
+
+    工具名 {id}__sensors.get_* / set_* 对应 coap_hub.h 的 GET/PUT。
+    资源 {id}__sensor://events 对应 topic mcp_sensors/<id>/event。
+    禁止把 PCM 或 Discovery 接到这里。
+    """
 
     def __init__(
         self,
         registry: DeviceRegistry,
-        client: DeviceMcpClient,
+        client: DeviceCoapClient,
         sessions: SessionManager,
-        bridge: DeviceNotificationBridge,
     ) -> None:
         self.registry = registry
         self.client = client
         self.sessions = sessions
-        self.bridge = bridge
 
     def public_tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = [
             {
                 "name": GATEWAY_LIST_DEVICES,
                 "description": (
-                    "列出当前在线的传感器设备（id/name/url）。"
-                    "调用具体设备工具前可用此工具确认设备 id；"
-                    f"设备工具名格式为 {{id}}{config.TOOL_SEP}{{native_name}}。"
-                    f"设备资源 URI 格式为 {{id}}{config.TOOL_SEP}{{native_uri}}，"
-                    "例如 {{id}}__sensor://events。订阅后经 GET /mcp SSE 接收更新通知。"
+                    "列出已发现设备（mDNS 枢纽或 MQTT 叶子）。"
+                    f"枢纽工具 {{id}}{config.TOOL_SEP}sensors.get_snapshot 等走 CoAP；"
+                    f"事件 {{id}}{config.TOOL_SEP}sensor://events 走 MQTT。"
                 ),
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             }
         ]
+        empty = {"type": "object", "properties": {}, "additionalProperties": True}
+        hub_catalog = (
+            ("sensors.get_snapshot", "CoAP GET /sensors/snapshot"),
+            ("sensors.get_thresholds", "CoAP GET /sensors/thresholds"),
+            ("sensors.set_thresholds", "CoAP PUT /sensors/thresholds"),
+            ("sensors.get_config", "CoAP GET /sensors/config"),
+            ("sensors.set_config", "CoAP PUT /sensors/config"),
+            ("sensors.get_recent_events", "MQTT 缓存或 CoAP GET /sensors/events"),
+        )
+        leaf_catalog = (
+            ("sensors.get_recent_events", "仅 MQTT 事件缓存（叶子无常驻 CoAP）"),
+        )
         for rec in self.registry.list_online():
             label = rec.name or rec.id
-            for t in rec.tools:
-                native = str(t.get("name") or "")
-                if not native:
-                    continue
-                prefixed = f"{rec.id}{config.TOOL_SEP}{native}"
-                desc = str(t.get("description") or native)
+            catalog = hub_catalog if rec.has_coap() else leaf_catalog
+            for native, desc in catalog:
                 tools.append(
                     {
-                        "name": prefixed,
+                        "name": f"{rec.id}{config.TOOL_SEP}{native}",
                         "description": f"[{label}/{rec.id}] {desc}",
-                        "inputSchema": t.get("inputSchema")
-                        or t.get("input_schema")
-                        or {"type": "object", "properties": {}},
+                        "inputSchema": empty,
                     }
                 )
         return tools
@@ -72,18 +85,17 @@ class AggregatorMcp:
         resources: list[dict[str, Any]] = []
         for rec in self.registry.list_online():
             label = rec.name or rec.id
-            for r in rec.resources:
-                native_uri = str(r.get("uri") or "")
-                if not native_uri:
-                    continue
-                item = dict(r)
-                item["uri"] = f"{rec.id}{config.TOOL_SEP}{native_uri}"
-                desc = str(r.get("description") or r.get("name") or native_uri)
-                item["description"] = f"[{label}/{rec.id}] {desc}"
-                name = str(r.get("name") or "")
-                if name and config.TOOL_SEP not in name:
-                    item["name"] = f"{rec.id}{config.TOOL_SEP}{name}"
-                resources.append(item)
+            resources.append(
+                {
+                    "uri": f"{rec.id}{config.TOOL_SEP}sensor://events",
+                    "name": f"{rec.id}{config.TOOL_SEP}events",
+                    "mimeType": "application/json",
+                    "description": (
+                        f"[{label}/{rec.id}] MQTT {config.MQTT_PREFIX}/{rec.id}/event；"
+                        "禁止用 MQTT 改配置"
+                    ),
+                }
+            )
         return resources
 
     async def handle_post(self, request: Request) -> Response:
@@ -145,12 +157,10 @@ class AggregatorMcp:
                             "version": config.SERVER_VERSION,
                         },
                         "instructions": (
-                            "多设备传感器聚合网关。"
-                            "环境读数与阈值：{id}__sensors.get_snapshot（含 sound_db、sound_warning_db、thresholds）；"
-                            "仅阈值：{id}__sensors.get_thresholds（sound.warning_db 等）；"
-                            "雷达区域：{id}__sensors.get_config；"
-                            "事件轮询请优先：{id}__sensors.get_recent_events（limit/category，比 resources/read 更稳）；"
-                            "事件资源：{id}__sensor://events（subscribe + GET /mcp SSE）。"
+                            "设备通道：mDNS _mcp-sensors + CoAP 读写 + MQTT 仅事件。"
+                            "快照/阈值/雷达：{id}__sensors.get_* / set_*（CoAP）。"
+                            "事件：订 {id}__sensor://events 或 get_recent_events。"
+                            "PCM 只走 WebSocket。"
                         ),
                     },
                 }
@@ -212,13 +222,11 @@ class AggregatorMcp:
         if rec.id not in online_ids:
             raise RuntimeError(f"设备离线或心跳超时: {device_id}")
         await self.sessions.subscribe(session, public_uri)
-        await self.bridge.on_subscribe(public_uri)
 
     async def _unsubscribe(self, session: Optional[str], public_uri: str) -> None:
         if not session:
             return
         await self.sessions.unsubscribe(session, public_uri)
-        await self.bridge.on_unsubscribe(public_uri)
 
     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == GATEWAY_LIST_DEVICES:
@@ -255,20 +263,66 @@ class AggregatorMcp:
             }
 
         try:
-            return await self.client.call_tool(rec.mcp_url, native, arguments)
+            data = await self._coap_tool(rec, native, arguments)
+            text = json.dumps(data, ensure_ascii=False)
+            return {"content": [{"type": "text", "text": text}], "isError": False}
         except Exception as e:
             self.registry.mark_error(device_id, str(e))
             return {
-                "content": [{"type": "text", "text": f"调用设备失败: {e}"}],
+                "content": [{"type": "text", "text": f"调用失败: {e}"}],
                 "isError": True,
             }
+
+    @staticmethod
+    def _events_from_feed(feed: Any, *, limit: int, category: str = "") -> dict[str, Any]:
+        """Normalize CoAP /sensors/events feed or MQTT cache to {events:[...]}."""
+        if isinstance(feed, dict) and isinstance(feed.get("events"), list):
+            events = list(feed["events"])
+        elif isinstance(feed, list):
+            events = list(feed)
+        else:
+            events = []
+        if category:
+            events = [e for e in events if isinstance(e, dict) and str(e.get("category") or "") == category]
+        return {"events": events[-limit:] if limit > 0 else events}
+
+    async def _coap_tool(self, rec: Any, native: str, arguments: dict[str, Any]) -> Any:
+        if native == "sensors.get_recent_events":
+            limit = int(arguments.get("limit") or 20)
+            cat = str(arguments.get("category") or "").strip()
+            cached = list(rec.event_cache)
+            if cat:
+                cached = [e for e in cached if str(e.get("category") or "") == cat]
+            if cached:
+                return {"events": cached[-limit:]}
+            if rec.has_coap():
+                host, port = rec.coap_endpoint()
+                feed = await self.client.get_json(host, "/sensors/events", port)
+                return self._events_from_feed(feed, limit=limit, category=cat)
+            return {"events": []}
+        if not rec.has_coap():
+            raise RuntimeError("该设备无 CoAP（叶子仅 MQTT 事件）")
+        host, port = rec.coap_endpoint()
+        if native == "sensors.get_snapshot":
+            return await self.client.get_json(host, "/sensors/snapshot", port)
+        if native == "sensors.get_thresholds":
+            return await self.client.get_json(host, "/sensors/thresholds", port)
+        if native == "sensors.set_thresholds":
+            # 固件接受 thresholds 对象，或 {"sensors":{...}}
+            body = arguments.get("sensors") if isinstance(arguments.get("sensors"), dict) else arguments
+            return await self.client.put_json(host, "/sensors/thresholds", body, port)
+        if native == "sensors.get_config":
+            return await self.client.get_json(host, "/sensors/config", port)
+        if native == "sensors.set_config":
+            return await self.client.put_json(host, "/sensors/config", arguments, port)
+        raise RuntimeError(f"未知工具 {native}")
 
     async def _read_resource(self, public_uri: str) -> dict[str, Any]:
         if config.TOOL_SEP not in public_uri:
             raise RuntimeError(
                 f"资源 URI 须为 id{config.TOOL_SEP}native，例如 demo01{config.TOOL_SEP}sensor://events"
             )
-        device_id, native_uri = public_uri.split(config.TOOL_SEP, 1)
+        device_id, _native_uri = public_uri.split(config.TOOL_SEP, 1)
         rec = self.registry.get(device_id)
         if rec is None:
             raise RuntimeError(f"设备未注册: {device_id}")
@@ -277,28 +331,27 @@ class AggregatorMcp:
             raise RuntimeError(f"设备离线或心跳超时: {device_id}")
 
         try:
-            result = await self.client.read_resource(rec.mcp_url, native_uri)
+            if rec.event_cache:
+                payload = {"events": rec.event_cache[-32:]}
+            elif rec.has_coap():
+                host, port = rec.coap_endpoint()
+                feed = await self.client.get_json(host, "/sensors/events", port)
+                payload = self._events_from_feed(feed, limit=32)
+            else:
+                payload = {"events": []}
         except Exception as e:
             self.registry.mark_error(device_id, str(e))
-            raise RuntimeError(f"读取设备资源失败: {e}") from e
-
-        contents = result.get("contents")
-        if isinstance(contents, list):
-            rewritten = []
-            for item in contents:
-                if not isinstance(item, dict):
-                    rewritten.append(item)
-                    continue
-                row = dict(item)
-                uri = str(row.get("uri") or native_uri)
-                if uri.startswith(f"{device_id}{config.TOOL_SEP}"):
-                    row["uri"] = uri
-                else:
-                    row["uri"] = f"{device_id}{config.TOOL_SEP}{uri}"
-                rewritten.append(row)
-            result = dict(result)
-            result["contents"] = rewritten
-        return result
+            raise RuntimeError(f"读取事件失败: {e}") from e
+        text = json.dumps(payload, ensure_ascii=False)
+        return {
+            "contents": [
+                {
+                    "uri": public_uri,
+                    "mimeType": "application/json",
+                    "text": text,
+                }
+            ]
+        }
 
     async def handle_get(self, request: Request) -> Response:
         accept = (request.headers.get("accept") or "").lower()

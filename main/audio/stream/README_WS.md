@@ -1,15 +1,16 @@
 # WebSocket 音频客户端（设备 → 网关）
 
-设备作为 **WebSocket 客户端** 连接网关 URI（`CONFIG_AUDIO_WS_URI`），唤醒后上行麦克风 PCM，接收下行 PCM 经 NS4168 播放。
+设备作为 **WebSocket 客户端**，URI 由 mDNS 告知，不写死网关 IP。
 
 实现：[`audio_ws_client.c`](audio_ws_client.c)（`CONFIG_AUDIO_WS_ENABLE`）。
 
 ## 连接
 
-- 优先：入网后通过 mDNS `_mcp-gw._tcp` 的 TXT `ws=` 自动发现（与 MCP 注册同一广播）
-- 回退：`CONFIG_AUDIO_WS_URI`（默认 `ws://192.168.1.27:8765/ws`）
-- 串口关键字：`audio_ws: using gateway URI:` / `mcp_gw: mDNS voice WS:` / `mcp_gw: voice WS URI:`
-- 可选鉴权：`CONFIG_AUDIO_WS_AUTH_HEADER`（完整头行，如 `Authorization: Bearer <token>`）
+- 优先：mDNS `_voice-ws._tcp`（TXT `ws=` 或 `ws://{ip}:{port}/ws`）
+- 其次：兼容 `_mcp-gw._tcp` 的 TXT `ws=`（旧网关广播）
+- 回退：`CONFIG_AUDIO_WS_URI`（默认空）
+- 串口关键字：`voice_mdns` / `audio_ws`
+- 对端可以是 `server_stack/voice-bridge` 或 HA Add-on `mcp_sensors_voice`。禁止用 WS 传传感器。
 
 ## 上行（设备 → 网关，麦克风）
 
@@ -56,7 +57,7 @@
 ## 与事件总线的关系
 
 - WebSocket **只传媒体**，不承载分类告警
-- YAMNet / 声级告警仍走 `device_event_emit(category=sound)` → `sensor://events` / `/api/events`
+- YAMNet / 声级告警仍走 `device_event_emit` → MQTT `mcp_sensors/<id>/event`（及 CoAP GET `/sensors/events` 补拉）
 - 唤醒后开始上行：`ESP_SR_WAKE_START_STREAM` 优先 WS；未开 `AUDIO_WS` 时回退 UDP `audio_stream`
 
 ## 配置

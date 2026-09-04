@@ -38,6 +38,7 @@ static wifi_on_ap_started_cb_t s_on_ap_started;
 static wifi_on_connecting_cb_t s_on_connecting;
 static wifi_on_connect_failed_cb_t s_on_failed;
 static int s_retry_count;
+static bool s_identify_ap;
 static int s_retry_max;
 static bool s_wifi_inited;
 static bool s_hosted_inited;
@@ -616,4 +617,51 @@ esp_err_t wifi_manager_init(wifi_on_connected_cb_t on_connected, wifi_on_ap_star
 
     ESP_LOGI(TAG, "no WiFi in NVS, starting AP provisioning");
     return wifi_manager_start_ap();
+}
+
+esp_err_t wifi_manager_start_identify_ap(void)
+{
+    if (s_identify_ap) {
+        return ESP_OK;
+    }
+    wifi_config_t cfg = {
+        .ap = {
+            .ssid = "MCP-Sensors-Find",
+            .channel = 1,
+            .password = "",
+            .max_connection = 4,
+            .authmode = WIFI_AUTH_OPEN,
+        },
+    };
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = esp_wifi_set_config(WIFI_IF_AP, &cfg);
+    if (err != ESP_OK) {
+        return err;
+    }
+    configure_ap_captive_portal();
+    captive_portal_set_redirect("http://192.168.4.1/identify");
+    captive_portal_start();
+    s_identify_ap = true;
+    ESP_LOGI(TAG, "identify APSTA SSID=%s -> http://192.168.4.1/identify", cfg.ap.ssid);
+    return ESP_OK;
+}
+
+void wifi_manager_stop_identify_ap(void)
+{
+    if (!s_identify_ap) {
+        return;
+    }
+    captive_portal_set_redirect("http://192.168.4.1/");
+    captive_portal_stop();
+    (void)esp_wifi_set_mode(WIFI_MODE_STA);
+    s_identify_ap = false;
+    ESP_LOGI(TAG, "identify AP stopped");
+}
+
+bool wifi_manager_is_identify_ap(void)
+{
+    return s_identify_ap;
 }

@@ -18,7 +18,7 @@ void board_snapshot_init(void)
     sensor_settings_init();
     (void)device_event_bus_init();
     (void)env_event_detector_start();
-    /* 与 MCP 解耦：Web 仪表盘也需要 range_enter/exit */
+    /* Web 仪表盘也需要 range_enter/exit，不依赖 CoAP 客户端 */
     esp_err_t err = radar_events_start(NULL);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "radar_events_start FAILED: %s", esp_err_to_name(err));

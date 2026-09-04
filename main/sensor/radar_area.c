@@ -400,9 +400,8 @@ esp_err_t radar_area_get_status(area_status_t areas[AREA_TAG_MAX], uint8_t *out_
         return ESP_OK;
     }
 
-    if (c4004_sensor_is_ready()) {
-        (void)c4004_sensor_refresh_targets();
-    }
+    /* 只用 radar_events / C4004 任务已刷新的缓存。
+     * 禁止在此同步 UART：CoAP/HTTP 任务栈小，request_frame 会 Stack protection fault。 */
 
     for (uint8_t i = 0; i < s_area_config.tag_count; i++) {
         const area_tag_t *tag = &s_area_config.tags[i];

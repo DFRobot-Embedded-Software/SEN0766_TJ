@@ -20,7 +20,7 @@ extern "C" {
 
 /** 单个可检测事件的静态描述（表驱动） */
 typedef struct {
-    /** 应用/MCP 用稳定 id，如 "cry" */
+    /** 应用/事件总线用稳定 id，如 "cry" */
     const char *id;
     /** 日志短名，如 "CRY" */
     const char *log_name;

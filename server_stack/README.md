@@ -10,7 +10,7 @@ server_stack/
   logs/                  # 运行日志（自动创建）
 ```
 
-> **网络要求：** 设备与运行本服务器栈的机器**必须在同一网段**（同一局域网），否则无法通过局域网 IP / mDNS 访问 MCP 网关与语音 bridge。
+> **网络要求：** 设备与运行本服务器栈的机器**必须在同一网段**，否则无法 mDNS / CoAP / 语音 WS。
 
 ## 移植到新机器
 
@@ -53,16 +53,22 @@ server_stack/
    ./start_services.sh
    ```
 
-爱马仕 MCP 配置（`~/.hermes/config.yaml`）保持：
+爱马仕 MCP 写入 `~/.hermes/config.yaml`（改完后重启 `hermes gateway` 或新开对话）：
 
 ```yaml
 mcp_servers:
   mcp_sensors_gw:
-    url: "http://127.0.0.1:9080/mcp"
+    url: http://127.0.0.1:9080/mcp
     enabled: true
+    connect_timeout: 30
+    timeout: 120
+    skip_preflight: true
 ```
 
-资源 URI 经网关后为 `{设备id}__sensor://events`。
+- `mcp_sensors_gw`：本机聚合网关（Streamable HTTP）。`skip_preflight: true` 必填，否则爱马仕预检容易失败。
+- 爱马仕里工具名形如 `mcp__mcp_sensors_gw__gw.list_devices`、`mcp__mcp_sensors_gw__{id}__sensors.get_snapshot`。没有名为 `read_resource` 的工具。
+
+资源 URI 经网关后为 `{设备id}__sensor://events`。枢纽工具走 CoAP；仅 MQTT 的叶子由网关按 `mcp_sensors/<id>/event` 自动建档，只提供事件工具/资源。
 
 - `resources/list` / `resources/read`：拉取
 - `resources/subscribe` + `GET /mcp`（`Accept: text/event-stream` + `MCP-Session-Id`）：接收 `notifications/resources/updated` SSE 推送
@@ -74,9 +80,9 @@ mcp_servers:
 | mcp_gw | 9080 |
 | voice-bridge | 8765 |
 | 爱马仕 API | 8642 |
-| HAOS MQTT（可选） | 192.168.0.219:1883 |
+| MQTT broker（可选） | 本机或局域网 :1883 |
 
-传感器进 Home Assistant：在 `mcp_gw/.env` 配置 `MQTT_HOST` 等，见 `mcp_gw/README.md` 的 MQTT 一节。音频仍只走 voice-bridge，不进 MQTT。
+网关与 Home Assistant **互不依赖**。若要传感器进 HA，另拷 `homeassistant/custom_components/mcp_sensors`（可选）。音频只走 voice-bridge。
 
 `start_services.sh` 顺序：mcp_gw → 爱马仕 → bridge（避免爱马仕启动时 MCP 尚未监听）。
 

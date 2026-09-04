@@ -102,3 +102,13 @@ esp_err_t wifi_manager_scan(wifi_scan_ap_t *out, uint16_t max_count, uint16_t *o
 
 /** @brief 断开 STA、清除凭据并回到 AP 配网 */
 esp_err_t wifi_manager_disconnect(void);
+
+/**
+ * 查地址临时 AP（APSTA）：STA 尽量不断。
+ * 门户只展示身份与 IP，不在这里改传感器。超时/再按见 identify_btn。
+ */
+esp_err_t wifi_manager_start_identify_ap(void);
+/** 关掉临时 AP，恢复仅 STA（若仍已入网） */
+void wifi_manager_stop_identify_ap(void);
+/** 为 true 时 Web 404 仍按门户劫持，且 AP 回调不要拆掉业务 comm_hub */
+bool wifi_manager_is_identify_ap(void);

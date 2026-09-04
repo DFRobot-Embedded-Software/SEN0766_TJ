@@ -14,7 +14,10 @@
 #include "c4004_sensor.h"
 #include "device_event_bus.h"
 #include "device_event_types.h"
+#include "device_id.h"
 #include "env_sensors.h"
+#include "mqtt_discover.h"
+#include "mqtt_hub.h"
 #include "ota_update.h"
 #include "radar_area.h"
 #include "radar_events.h"
@@ -142,11 +145,6 @@ static esp_err_t static_file_handler(httpd_req_t *req)
     const char *uri = req->uri;
 
     if (strncmp(uri, "/api/", 5) == 0) {
-        httpd_resp_send_404(req);
-        return ESP_FAIL;
-    }
-
-    if (strncmp(uri, "/mcp", 4) == 0) {
         httpd_resp_send_404(req);
         return ESP_FAIL;
     }
@@ -773,6 +771,20 @@ static esp_err_t api_wifi_get_handler(httpd_req_t *req)
     cJSON_AddStringToObject(root, "ssid", st.ssid);
     cJSON_AddStringToObject(root, "password", st.password);
     cJSON_AddStringToObject(root, "ip", st.ip);
+    char id[8] = {0};
+    char host[32] = {0};
+    if (device_id_get(id, sizeof(id)) == ESP_OK) {
+        cJSON_AddStringToObject(root, "id", id);
+        snprintf(host, sizeof(host), "mcp-sensors-%s.local", id);
+        cJSON_AddStringToObject(root, "hostname", host);
+    }
+    cJSON_AddBoolToObject(root, "mqtt_connected", mqtt_hub_is_connected());
+    cJSON_AddStringToObject(root, "mqtt_broker", mqtt_hub_broker_uri());
+    {
+        const char *mu = mqtt_discover_get_username();
+        cJSON_AddStringToObject(root, "mqtt_user", (mu && mu[0]) ? mu : "");
+    }
+    cJSON_AddStringToObject(root, "mqtt_event_topic", mqtt_hub_event_topic());
 
     esp_err_t err = send_json(req, root);
     cJSON_Delete(root);
@@ -790,7 +802,7 @@ static void wifi_disconnect_task(void *arg)
 
 static esp_err_t api_wifi_post_handler(httpd_req_t *req)
 {
-    char body[256] = {0};
+    char body[512] = {0};
     if (read_request_body(req, body, sizeof(body)) <= 0) {
         return send_json_error(req, "400 Bad Request", "invalid body");
     }
@@ -801,6 +813,26 @@ static esp_err_t api_wifi_post_handler(httpd_req_t *req)
     }
 
     const cJSON *action = cJSON_GetObjectItem(root, "action");
+    if (cJSON_IsString(action) && strcmp(action->valuestring, "mqtt") == 0) {
+        const cJSON *broker = cJSON_GetObjectItem(root, "broker");
+        const cJSON *user = cJSON_GetObjectItem(root, "user");
+        const cJSON *pass = cJSON_GetObjectItem(root, "password");
+        const char *uri = cJSON_IsString(broker) ? broker->valuestring : NULL;
+        const char *u = cJSON_IsString(user) ? user->valuestring : NULL;
+        const char *p = cJSON_IsString(pass) ? pass->valuestring : NULL;
+        esp_err_t applied = mqtt_discover_apply(uri, u, p);
+        cJSON_Delete(root);
+        if (applied != ESP_OK) {
+            return send_json_error(req, "400 Bad Request", "invalid mqtt broker");
+        }
+        (void)mqtt_hub_start();
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddBoolToObject(resp, "ok", true);
+        cJSON_AddStringToObject(resp, "mqtt_broker", mqtt_discover_get_broker_uri());
+        esp_err_t err = send_json(req, resp);
+        cJSON_Delete(resp);
+        return err;
+    }
     if (cJSON_IsString(action) && strcmp(action->valuestring, "reprovision") == 0) {
         cJSON_Delete(root);
 
@@ -1159,11 +1191,34 @@ static esp_err_t api_logs_post_handler(httpd_req_t *req)
 static esp_err_t captive_redirect_handler(httpd_req_t *req, httpd_err_code_t err)
 {
     (void)err;
-    if (s_provision_mode) {
+    if (s_provision_mode || wifi_manager_is_identify_ap()) {
         return captive_portal_redirect(req);
     }
     httpd_resp_send_404(req);
     return ESP_FAIL;
+}
+
+static esp_err_t identify_page_handler(httpd_req_t *req)
+{
+    /* 人机查地址：STA IP + id + .local。不是 CoAP 资源，也不是 MQTT。 */
+    wifi_status_t st = {0};
+    wifi_manager_get_status(&st);
+    char id[8] = {0};
+    device_id_get(id, sizeof(id));
+    char page[768];
+    snprintf(page, sizeof(page),
+             "<!DOCTYPE html><meta charset=utf-8><title>设备地址</title>"
+             "<body style='font-family:sans-serif;padding:24px'>"
+             "<h2>mcp_sensors 查地址</h2>"
+             "<p>STA IP：<b>%s</b></p>"
+             "<p>id：<b>%s</b></p>"
+             "<p>浏览器：<b>http://mcp-sensors-%s.local</b></p>"
+             "<p>CoAP UDP 5683。MQTT 事件 mcp_sensors/%s/event</p>"
+             "<p>连家里的 Wi‑Fi 后用主机名；安卓若不支持 .local 请用上面的 IP。</p>"
+             "</body>",
+             st.ip[0] ? st.ip : "(未获取)", id, id, id);
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
 }
 
 static void register_api_handlers(void)
@@ -1183,6 +1238,7 @@ static void register_api_handlers(void)
     httpd_uri_t ota_post = {.uri = "/api/ota", .method = HTTP_POST, .handler = api_ota_post_handler};
     httpd_uri_t logs_get = {.uri = "/api/logs", .method = HTTP_GET, .handler = api_logs_get_handler};
     httpd_uri_t logs_post = {.uri = "/api/logs", .method = HTTP_POST, .handler = api_logs_post_handler};
+    httpd_uri_t identify = {.uri = "/identify", .method = HTTP_GET, .handler = identify_page_handler};
 
     httpd_register_uri_handler(s_server, &data);
     httpd_register_uri_handler(s_server, &mmwave);
@@ -1199,6 +1255,7 @@ static void register_api_handlers(void)
     httpd_register_uri_handler(s_server, &ota_post);
     httpd_register_uri_handler(s_server, &logs_get);
     httpd_register_uri_handler(s_server, &logs_post);
+    httpd_register_uri_handler(s_server, &identify);
 }
 
 static esp_err_t start_server(const char *index_page, bool provision_mode)
@@ -1239,7 +1296,8 @@ static esp_err_t start_server(const char *index_page, bool provision_mode)
         httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, captive_redirect_handler);
         ESP_LOGI(TAG, "provision server: http://192.168.4.1");
     } else {
-        ESP_LOGI(TAG, "dashboard httpd ready (register MCP before static routes)");
+        httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, captive_redirect_handler);
+        ESP_LOGI(TAG, "dashboard httpd ready");
     }
 
     return ESP_OK;

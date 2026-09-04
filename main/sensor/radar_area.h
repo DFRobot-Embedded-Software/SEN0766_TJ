@@ -62,7 +62,7 @@ typedef struct {
 /** @brief 从 NVS 加载区域配置，并拉起 C4004 */
 void radar_area_init(void);
 
-/** @brief 读取各已配置区域的实时状态（长度不超过 AREA_TAG_MAX，返回实际数量） */
+/** @brief 读取各已配置区域的缓存状态（不触发 UART；由 radar_events 刷新） */
 esp_err_t radar_area_get_status(area_status_t areas[AREA_TAG_MAX], uint8_t *out_count);
 
 /** @brief 从 C4004 读取当前目标坐标 (cm)，供 Web 采集角点；picked_index 可传 NULL */

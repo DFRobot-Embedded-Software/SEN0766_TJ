@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""冒烟：假设备 + 网关 resources list/read/subscribe + SSE 推送。"""
+"""冒烟：手工登记 + 聚合 MCP initialize / tools/list（CoAP 工具目录，不连设备 HTTP MCP）。"""
 from __future__ import annotations
 
 import asyncio
-import json
+import os
 import subprocess
 import sys
 import time
@@ -30,24 +30,14 @@ async def wait_http(url: str, timeout: float = 15.0) -> None:
 
 async def run() -> None:
     py = sys.executable
-    fake = subprocess.Popen([py, str(ROOT / "fake_device.py"), "--port", "18080"])
-    gw = subprocess.Popen(
-        [py, "-m", "mcp_gw"],
-        cwd=str(ROOT),
-        env={**dict(**{k: v for k, v in __import__("os").environ.items()}), "MCP_GW_PORT": "19080"},
-    )
+    env = {**os.environ, "MCP_GW_PORT": "19080", "MCP_GW_MDNS": "0", "MQTT_ENABLE": "0", "MQTT_HOST": ""}
+    gw = subprocess.Popen([py, "-m", "mcp_gw"], cwd=str(ROOT), env=env)
     try:
         await wait_http("http://127.0.0.1:19080/health")
         async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.post(
                 "http://127.0.0.1:19080/api/devices/register",
-                json={
-                    "id": "demo01",
-                    "name": "测试设备",
-                    "ip": "127.0.0.1",
-                    "port": 18080,
-                    "path": "/mcp_server",
-                },
+                json={"id": "demo01", "name": "测试设备", "ip": "127.0.0.1", "port": 5683},
             )
             print("register", r.status_code, r.text)
             r.raise_for_status()
@@ -68,76 +58,24 @@ async def run() -> None:
                 headers={"Accept": "application/json, text/event-stream"},
             )
             r.raise_for_status()
-            sid = r.headers.get("mcp-session-id")
-            caps = r.json()["result"]["capabilities"]
-            assert caps["resources"]["subscribe"] is True
-            print("initialize ok session", sid)
-            headers = {
-                "Accept": "application/json, text/event-stream",
-                **({"MCP-Session-Id": sid} if sid else {}),
-            }
-
+            names = []
             r = await client.post(
                 "http://127.0.0.1:19080/mcp",
-                json={"jsonrpc": "2.0", "id": 2, "method": "resources/list", "params": {}},
-                headers=headers,
+                json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+                headers={"Accept": "application/json", "MCP-Session-Id": r.headers.get("mcp-session-id") or ""},
             )
             r.raise_for_status()
-            uris = [x["uri"] for x in r.json()["result"]["resources"]]
-            assert "demo01__sensor://events" in uris
-
-            r = await client.post(
-                "http://127.0.0.1:19080/mcp",
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "method": "resources/subscribe",
-                    "params": {"uri": "demo01__sensor://events"},
-                },
-                headers=headers,
-            )
-            r.raise_for_status()
-            assert "error" not in r.json()
-            print("subscribe ok")
-
-            # 打开 Hermes 侧 SSE，等待桥接后的 updated
-            got_updated = False
-            async with client.stream(
-                "GET",
-                "http://127.0.0.1:19080/mcp",
-                headers={
-                    "Accept": "text/event-stream",
-                    **({"MCP-Session-Id": sid} if sid else {}),
-                },
-                timeout=httpx.Timeout(20.0),
-            ) as resp:
-                assert resp.status_code == 200
-                buf = ""
-                deadline = time.time() + 12.0
-                async for chunk in resp.aiter_text():
-                    buf += chunk
-                    while "\n\n" in buf:
-                        block, buf = buf.split("\n\n", 1)
-                        for line in block.splitlines():
-                            if line.startswith("data:"):
-                                payload = line[5:].strip()
-                                if not payload:
-                                    continue
-                                msg = json.loads(payload)
-                                print("sse note", msg)
-                                if msg.get("method") == "notifications/resources/updated":
-                                    assert msg["params"]["uri"] == "demo01__sensor://events"
-                                    got_updated = True
-                    if got_updated or time.time() > deadline:
-                        break
-
-            assert got_updated, "did not receive resources/updated over SSE"
-        print("SMOKE OK")
+            names = [t["name"] for t in r.json()["result"]["tools"]]
+            print("tools", names)
+            assert "gw.list_devices" in names
+            assert "demo01__sensors.get_snapshot" in names
+            print("smoke ok")
     finally:
         gw.terminate()
-        fake.terminate()
-        gw.wait(timeout=5)
-        fake.wait(timeout=5)
+        try:
+            gw.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            gw.kill()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,10 @@
 /**
  * @file device_event_bus.h
- * @brief 统一设备事件总线：环形日志 + 订阅通知（MCP / Web 共用）
+ * @brief 本地事件环形日志。emit 后：网页/CoAP 可读；并 mqtt_hub_publish_event 广播。
+ *
+ * 不是 MCP。JSON 字段（与 MQTT 载荷相同）：
+ *   type, category, timestamp, area_id, area?, message?, person_id?, active?, static?, payload?
+ * 即时告警（进门/哭声）订阅方应订 MQTT；GET /sensors/events 只是补拉。
  */
 #pragma once
 

@@ -107,5 +107,14 @@ print(
 )
 
 print(f"uploaded {uploaded} files → {REMOTE_ROOT}")
-print("on server: cd ~/桌面/server_stack && ./start_services.sh")
+print("=== restart mcp_gw ===")
+print(
+    run(
+        "fuser -k 9080/tcp 2>/dev/null || true; "
+        "pkill -9 -f 'python.*-m mcp_gw' 2>/dev/null || true",
+        timeout=15,
+    )
+)
+print(run(f"cd '{REMOTE_ROOT}' && chmod +x *.sh && ./start_services.sh", timeout=180))
+print("on server: cd ~/桌面/server_stack && ./status_services.sh")
 ssh.close()

@@ -12,83 +12,74 @@ from starlette.routing import Route
 from . import config
 from .aggregator import AggregatorMcp
 from .api import RegisterApi
-from .device_bridge import DeviceNotificationBridge
-from .device_client import DeviceMcpClient
+from .coap_client import DeviceCoapClient
+from .device_mqtt import broker_uri_for_device, consume_config_change, push_if_missing
 from .mdns_advertise import MdnsAdvertiser
-from .mqtt_ha import HaMqttBridge
+from .mdns_devices import MdnsDeviceBrowser
+from .mqtt_events import MqttEventBridge
 from .registry import DeviceRegistry
 from .sessions import SessionManager
 
 log = logging.getLogger("mcp_gw")
 
 
+async def _mqtt_push_loop() -> None:
+    """Periodic HTTP MQTT fallback; force when MQTT options fingerprint changes."""
+    while True:
+        try:
+            force = consume_config_change()
+            for rec in STATE.registry.list_all():
+                host = (rec.coap_host or "").strip()
+                if host:
+                    await push_if_missing(host, force=force)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.debug("mqtt push loop: %s", e)
+        await asyncio.sleep(30)
+
+
 class AppState:
     def __init__(self) -> None:
         self.registry = DeviceRegistry(stale_s=config.STALE_S)
-        self.client = DeviceMcpClient(timeout_s=config.DEVICE_TIMEOUT_S)
+        self.client = DeviceCoapClient(timeout_s=config.DEVICE_TIMEOUT_S)
         self.sessions = SessionManager()
-        self.bridge = DeviceNotificationBridge(self.registry, self.sessions)
-        self.api = RegisterApi(self.registry, self.client)
-        self.agg = AggregatorMcp(self.registry, self.client, self.sessions, self.bridge)
+        self.api = RegisterApi(self.registry)
+        self.agg = AggregatorMcp(self.registry, self.client, self.sessions)
         self.mdns = MdnsAdvertiser()
-        self.mqtt = HaMqttBridge(self.registry, self.client)
-        self._refresh_task: asyncio.Task | None = None
-        self._prev_resource_keys: dict[str, frozenset[str]] = {}
+        self.mdns_dev = MdnsDeviceBrowser(self.registry)
+        self.mqtt = MqttEventBridge(self.registry, self.sessions)
 
 
 STATE = AppState()
 
 
-async def _refresh_loop() -> None:
-    while True:
-        try:
-            for rec in STATE.registry.list_all():
-                try:
-                    tools, resources = await STATE.client.fetch_catalog(rec.mcp_url)
-                    prev = STATE._prev_resource_keys.get(rec.id, frozenset())
-                    new_keys = frozenset(str(r.get("uri") or "") for r in resources if r.get("uri"))
-                    STATE.registry.set_catalog(rec.id, tools=tools, resources=resources)
-                    if prev and new_keys != prev:
-                        await STATE.sessions.publish_resources_list_changed()
-                    STATE._prev_resource_keys[rec.id] = new_keys
-                except Exception as e:
-                    STATE.registry.mark_error(rec.id, str(e))
-                    log.warning("refresh failed id=%s err=%s", rec.id, e)
-            # 同步 watcher（设备掉线等）
-            await STATE.bridge.sync_from_sessions()
-        except Exception:
-            log.exception("refresh loop error")
-        await asyncio.sleep(config.REFRESH_S)
-
-
 @asynccontextmanager
 async def lifespan(app: Starlette):
     log.info(
-        "mcp_gw starting host=%s port=%s stale=%.0fs refresh=%.0fs token=%s mdns=%s mqtt=%s sse=yes",
+        "mcp_gw starting host=%s port=%s token=%s mdns=%s mqtt=%s prefix=%s (CoAP tools + MQTT events)",
         config.HOST,
         config.PORT,
-        config.STALE_S,
-        config.REFRESH_S,
         "yes" if config.TOKEN else "no",
         "yes" if config.MDNS_ENABLE else "no",
         "on" if config.MQTT_ENABLE else "off",
+        config.MQTT_PREFIX,
     )
     await STATE.mdns.start()
+    await STATE.mdns_dev.start()
     await STATE.mqtt.start()
-    STATE._refresh_task = asyncio.create_task(_refresh_loop())
+    push_task = asyncio.create_task(_mqtt_push_loop(), name="mqtt-push-loop")
     try:
         yield
     finally:
-        if STATE._refresh_task:
-            STATE._refresh_task.cancel()
-            try:
-                await STATE._refresh_task
-            except asyncio.CancelledError:
-                pass
+        push_task.cancel()
+        try:
+            await push_task
+        except asyncio.CancelledError:
+            pass
         await STATE.mqtt.stop()
-        await STATE.bridge.stop()
+        await STATE.mdns_dev.stop()
         await STATE.mdns.stop()
-        await STATE.client.close()
 
 
 async def health(_: Request) -> JSONResponse:
@@ -101,9 +92,14 @@ async def health(_: Request) -> JSONResponse:
             "devices_total": len(STATE.registry.list_all()),
             "devices_online": len(online),
             "mcp": "/mcp",
+            "device_protocol": "coap+mqtt-event",
             "sse": True,
             "mdns": STATE.mdns.status(),
-            "mqtt": STATE.mqtt.status(),
+            "mqtt": {
+                **STATE.mqtt.status(),
+                "device_broker": broker_uri_for_device(),
+                "device_auth_configured": bool((config.MQTT_USER or "").strip()),
+            },
         }
     )
 
@@ -121,9 +117,8 @@ def create_app() -> Starlette:
         Route("/health", health, methods=["GET"]),
         Route("/api/devices", STATE.api.list_devices, methods=["GET"]),
         Route("/api/devices/register", STATE.api.register, methods=["POST"]),
-        Route("/api/devices/{id}/heartbeat", STATE.api.heartbeat, methods=["POST"]),
-        Route("/api/devices/{id}/refresh", STATE.api.refresh_device, methods=["POST"]),
         Route("/api/devices/{id}", STATE.api.delete_device, methods=["DELETE"]),
+        Route("/api/mqtt/push", STATE.api.push_mqtt, methods=["POST"]),
         Route("/mcp", mcp_post, methods=["POST"]),
         Route("/mcp", mcp_get, methods=["GET"]),
     ]

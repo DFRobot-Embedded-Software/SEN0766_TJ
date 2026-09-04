@@ -1,9 +1,9 @@
 /**
  * @file audio_ws_client.c
- * @brief WebSocket 客户端音频会话（上行 mic / 下行 amp）
+ * @brief WS 仅 PCM + 会话 op。URI 来自 voice_discover，不是 CoAP/MQTT。
  *
- * 会话：connect → uplink → 等下行 → play_stop 排空 → 可选续听窗口 → 再 uplink 或 dialog_idle。
- * 关键：事件回调里禁止阻塞（尤其禁止 ns4168_amp_write）；下行 PCM 入 ring，由 worker 播放。
+ * 会话：connect → uplink_start+PCM → 等下行 → play_stop 排空 → 可选续听 → 再 uplink 或 dialog_idle。
+ * 事件回调里禁止阻塞（尤其禁止 ns4168_amp_write）；下行 PCM 入 ring，由 worker 播放。
  */
 #include "audio_ws_client.h"
 #include "audio_capture.h"
@@ -27,9 +27,7 @@
 
 #if CONFIG_AUDIO_WS_ENABLE
 #include "esp_websocket_client.h"
-#if CONFIG_MCP_GW_CLIENT_ENABLE
-#include "mcp_gw_client.h"
-#endif
+#include "voice_discover.h"
 #endif
 
 static const char *TAG = "audio_ws";
@@ -539,14 +537,14 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base, int32_t 
 
 static const char *active_ws_uri(void)
 {
-    const char *uri = CONFIG_AUDIO_WS_URI;
-#if CONFIG_MCP_GW_CLIENT_ENABLE
-    const char *discovered = mcp_gw_get_voice_ws_uri();
+    const char *discovered = voice_discover_get_ws_uri();
     if (discovered && discovered[0]) {
-        uri = discovered;
+        return discovered;
     }
-#endif
-    return uri;
+    if (CONFIG_AUDIO_WS_URI[0] != '\0') {
+        return CONFIG_AUDIO_WS_URI;
+    }
+    return "";
 }
 
 static esp_err_t ensure_client_started(void)
@@ -564,6 +562,9 @@ static esp_err_t ensure_client_started(void)
     destroy_client();
 
     const char *uri = active_ws_uri();
+    if (!uri || !uri[0]) {
+        return ESP_ERR_INVALID_STATE;
+    }
     ESP_LOGI(TAG, "using gateway URI: %s", uri);
 
     /* 栈/缓冲过大或 internal 碎片时 xTaskCreate 会失败（Error create websocket task） */
@@ -1040,8 +1041,8 @@ esp_err_t audio_ws_client_init(void)
     }
 
     s_inited = true;
-    ESP_LOGI(TAG, "init OK sink=%d uri=%s (fallback) eos=%dms max=%dms dl_wait=%dms followup=%dms",
-             s_sink_id, CONFIG_AUDIO_WS_URI,
+    ESP_LOGI(TAG, "init OK sink=%d uri=%s eos=%dms max=%dms dl_wait=%dms followup=%dms",
+             s_sink_id, active_ws_uri(),
              CONFIG_AUDIO_WS_EOS_MS, CONFIG_AUDIO_WS_MAX_MS,
              CONFIG_AUDIO_WS_DOWNLINK_WAIT_MS, CONFIG_AUDIO_WS_FOLLOWUP_MS);
     return ESP_OK;

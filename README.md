@@ -8,7 +8,7 @@
 - **STA 联网**：保存 WiFi 凭据到 NVS，自动连接路由器并获取局域网 IP
 - **Web 监控**：同网段设备通过 `http://<设备IP>` 访问环境监测与人员活动状态页面
 - **C4004 区域检测**：通过 UART 连接 DFRobot C4004 毫米波雷达，支持人流统计、边缘门、靠近/远离等策略
-- **MCP SDK**：集成 Espressif MCP C SDK，便于后续扩展 AI 工具调用能力
+- **协议**：配网 AP/Web；mDNS 发现；CoAP 读写；MQTT 仅事件；WebSocket 仅音频。MCP 只在脚本网关，不在 ESP32。
 
 ## 硬件要求
 
@@ -76,9 +76,9 @@ idf.py set-target esp32p4
 | `idf` | `>=4.1.0` | ESP-IDF 框架 |
 | `espressif/esp_hosted` | `*` | P4 通过 SDIO 使用 C6 的 WiFi |
 | `espressif/esp_wifi_remote` | `*` | 远程 WiFi API 封装，兼容 `esp_wifi` 调用 |
-| `espressif/mcp-c-sdk` | `^2.0.1` | MCP 协议 C SDK |
-| `espressif/mdns` | `^1.0.3` | mDNS 服务（`mcp-sensors.local`） |
-| `vrxiaojie/stcc4` | `^1.0.0` | DFRobot STCC4 CO2/温湿度 I2C 驱动 |
+| `espressif/mdns` | `^1.0.3` | mDNS（`_mcp-sensors` / `_http`） |
+| `espressif/esp_websocket_client` | `^1.4.0` | 音频 WS 客户端 |
+| `espressif/mqtt` | IDF 组件 | 仅发 `mcp_sensors/<id>/event` |
 
 首次编译时，组件管理器会自动下载依赖到 `managed_components/` 目录。
 
@@ -87,7 +87,7 @@ idf.py set-target esp32p4
 ```powershell
 idf.py add-dependency "espressif/esp_hosted"
 idf.py add-dependency "espressif/esp_wifi_remote"
-idf.py add-dependency "espressif/mcp-c-sdk^2.0.1"
+idf.py add-dependency "espressif/mdns^1.0.3"
 ```
 
 ### ESP-IDF 内置组件（`main/CMakeLists.txt`）
@@ -153,32 +153,25 @@ idf.py -p COMx flash monitor
 3. **storage** — SPIFFS  
 4. **network** — WiFi / Hosted（不等 IP）  
 5. **audio** — capture + YAMNet / wake / stream  
-6. **online**（got IP）— mDNS、SNTP、MCP、Web Dashboard  
+6. **online**（got IP）— CoAP / MQTT 事件 / mDNS `_mcp-sensors`、SNTP、Web Dashboard  
 
 VERIFY_ONLY：仅 UI + audio。
 
-### MCP 框架（`:8080`）与传感器领域层分层
+### 通信与传感器分层
 
 ```text
-mcp/core/            传输与生命周期，纯框架，不认识任何传感器
-mcp/providers/env     薄适配器：调 board_snapshot，暴露 sensors.get_snapshot + sensor://temperature
-mcp/providers/radar    薄适配器：调 radar_area + radar_events，暴露区域工具 + sensor://events
-mcp/mcp_server.c      板级入口：注册 env+radar 后 mcp_core_start()
-
-sensor/env_sensors.c/h     纯环境：STCC4(温湿度/CO2) + LTR-303(光照) + SC7A20H(加速度)
-sensor/radar_area.c/h      区域配置(NVS)、四点坐标→矩形几何、C4004 生命周期
-sensor/radar_events.c/h    区域进出/停留事件状态机（纯领域逻辑，不知道 MCP/HTTP 是什么）
-sensor/board_snapshot.c/h  组合 env_sensors + radar_area，供 Web /api/data 与 MCP env provider 共用
+comm/                 CoAP Server、MQTT 仅事件、mDNS、语音发现。无 MCP。
+sensor/               驱动与快照；新传感器扩字段，不新发明传输。
+events/               device_event_bus → mqtt_hub_publish_event
 ```
 
-分层原则：**mcp/ 只做协议适配，业务逻辑都在 sensor/**。Provider 文件里不应该出现状态机、几何计算、NVS 读写——如果新写的 provider 变胖了，说明该把逻辑挪回 `sensor/`。
+分层原则：**sensor/ 不认识 CoAP/MQTT**；换 MCU 只换 HAL。WebUI 仍在 `spiffs/`。
 
-新增传感器：实现 `mcp_sensor_provider_t` → `mcp_core_add_provider` → **不改 core**。  
-WebUI 仍在 `spiffs/`，与 MCP 独立；改前端后 `idf.py spiffs-flash` 即可。
+新增传感器：改 `board_snapshot` / 事件 `type` / 必要时加一条 CoAP 资源。
 
 ### 调试顺序（由底向上）
 
-1. UI（灯/功放）→ 2. I2C0 三传感器 → 3. C4004 → 4. ES7210 采集 → 5. YAMNet/唤醒 → 6. WiFi → 7. Web `/api/data` → 8. MCP tools/resources  
+1. UI（灯/功放）→ 2. I2C0 三传感器 → 3. C4004 → 4. ES7210 采集 → 5. YAMNet/唤醒 → 6. WiFi → 7. Web `/api/data` → 8. CoAP GET /sensors/snapshot
 
 一次只开一层相关功能，缩小 menuconfig 范围。
 
@@ -380,19 +373,16 @@ mcp_sensors/
 │   ├── web/                    # HTTP 服务与 SPIFFS 文件系统
 │   │   ├── web_server.c/h
 │   │   └── web_fs.c/h
-│   ├── sensor/                 # 传感器领域逻辑（与 mcp/web 协议无关）
+│   ├── sensor/                 # 驱动与快照（不认识 CoAP/MQTT）
 │   │   ├── env_sensors.c/h        # 温湿度/CO2/光照/加速度聚合
 │   │   ├── radar_area.c/h         # 区域配置(NVS) + 几何 + C4004 生命周期
 │   │   ├── radar_events.c/h       # 区域进出/停留事件状态机
-│   │   ├── board_snapshot.c/h     # env+radar 组合快照（Web /api/data 用）
-│   │   ├── stcc4_sensor.c/h       # STCC4 I2C 驱动封装
-│   │   ├── ltr303_sensor.c/h      # LTR-303 I2C 驱动封装
-│   │   ├── sc7a20h_sensor.c/h     # SC7A20H I2C 驱动封装
-│   │   └── c4004_sensor.c/h       # C4004 UART 驱动封装
-│   ├── mcp/                    # MCP 框架 + Provider 适配层（见上）
-│   │   ├── core/
-│   │   ├── providers/
-│   │   └── mcp_server.c/h
+│   │   ├── board_snapshot.c/h     # env+radar 组合快照
+│   │   ├── stcc4_sensor.c/h
+│   │   ├── ltr303_sensor.c/h
+│   │   ├── sc7a20h_sensor.c/h
+│   │   └── c4004_sensor.c/h
+│   ├── comm/                   # CoAP / MQTT 事件 / mDNS / 语音发现
 │   ├── ota/                    # OTA 固件升级（封装 esp_ota_ops）
 │   │   └── ota_update.c/h
 │   ├── CMakeLists.txt
@@ -521,4 +511,5 @@ I wifi_mgr: got IP: 192.168.x.x                        # 连接成功
 - [ESP-IDF 入门指南](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/index.html)
 - [ESP-Hosted MCU 文档](https://github.com/espressif/esp-hosted-mcu)
 - [ESP32-P4 Function EV Board 说明](https://github.com/espressif/esp-hosted-mcu/blob/main/docs/esp32_p4_function_ev_board.md)
-- [MCP C SDK 组件](https://components.espressif.com/components/espressif/mcp-c-sdk)
+- [CoAP RFC 7252](https://datatracker.ietf.org/doc/html/rfc7252)（设备读写）
+- [Home Assistant 自定义集成](homeassistant/custom_components/mcp_sensors/README.md)

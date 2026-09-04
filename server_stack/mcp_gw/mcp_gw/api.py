@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from . import config
-from .device_client import DeviceMcpClient
+from .device_mqtt import broker_uri_for_device, config_fingerprint, push_all, push_if_missing
 from .registry import DeviceRegistry
 
 log = logging.getLogger("mcp_gw.api")
@@ -24,9 +26,10 @@ def _check_token(request: Request) -> bool:
 
 
 class RegisterApi:
-    def __init__(self, registry: DeviceRegistry, client: DeviceMcpClient) -> None:
+    """可选手工登记；主路径是浏览 _mcp-sensors._udp。不再拉取设备 HTTP MCP 目录。"""
+
+    def __init__(self, registry: DeviceRegistry) -> None:
         self.registry = registry
-        self.client = client
 
     async def register(self, request: Request) -> JSONResponse:
         if not _check_token(request):
@@ -41,95 +44,36 @@ class RegisterApi:
         device_id = str(body.get("id") or "").strip()
         name = str(body.get("name") or "").strip()
         fw = str(body.get("fw") or "").strip()
-        mcp_path = str(body.get("path") or body.get("mcp_path") or "/mcp_server").strip()
-
         base_url = str(body.get("base_url") or "").strip()
+        ip = str(body.get("ip") or "").strip()
+        port = int(body.get("port") or body.get("coap_port") or 5683)
         if not base_url:
-            ip = str(body.get("ip") or "").strip()
-            port = int(body.get("port") or 8080)
             if not ip:
-                return JSONResponse(
-                    {"ok": False, "error": "ip or base_url required"},
-                    status_code=400,
-                )
-            base_url = f"http://{ip}:{port}"
-
+                return JSONResponse({"ok": False, "error": "ip or base_url required"}, status_code=400)
+            base_url = f"http://{ip}"
+        if not ip:
+            ip = base_url.replace("http://", "").replace("https://", "").split("/")[0].split(":")[0]
         try:
             rec = self.registry.upsert(
                 device_id=device_id,
                 base_url=base_url,
-                mcp_path=mcp_path,
                 name=name,
                 fw=fw,
+                coap_host=ip,
+                coap_port=port,
             )
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
-
-        try:
-            tools, resources = await self.client.fetch_catalog(rec.mcp_url)
-            self.registry.set_catalog(rec.id, tools=tools, resources=resources)
-        except Exception as e:
-            self.registry.mark_error(rec.id, str(e))
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "error": f"registered but catalog fetch failed: {e}",
-                    "device": self.registry.to_public(rec),
-                },
-                status_code=502,
-            )
-
-        log.info(
-            "registered device id=%s url=%s tools=%s resources=%s",
-            rec.id,
-            rec.mcp_url,
-            len(rec.tools),
-            len(rec.resources),
-        )
-        return JSONResponse({"ok": True, "device": self.registry.to_public(rec)})
-
-    async def heartbeat(self, request: Request) -> JSONResponse:
-        if not _check_token(request):
-            return _unauthorized()
-        device_id = (request.path_params.get("id") or "").strip()
-        rec = self.registry.get(device_id)
-        if not rec:
-            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-        # 允许心跳顺带更新 IP
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        if isinstance(body, dict):
-            base_url = str(body.get("base_url") or "").strip()
-            ip = str(body.get("ip") or "").strip()
-            port = body.get("port")
-            path = str(body.get("path") or body.get("mcp_path") or "").strip()
-            if base_url or ip:
-                if not base_url:
-                    base_url = f"http://{ip}:{int(port or 8080)}"
-                self.registry.upsert(
-                    device_id=rec.id,
-                    base_url=base_url,
-                    mcp_path=path or rec.mcp_path,
-                    name=str(body.get("name") or rec.name),
-                    fw=str(body.get("fw") or rec.fw),
-                )
-                rec = self.registry.get(rec.id) or rec
-            else:
-                rec.touch()
-        else:
-            rec.touch()
+        log.info("registered device id=%s coap=%s", rec.id, f"{rec.coap_host}:{rec.coap_port}")
+        if rec.coap_host:
+            asyncio.create_task(push_if_missing(rec.coap_host), name=f"mqtt-push-reg-{rec.id}")
         return JSONResponse({"ok": True, "device": self.registry.to_public(rec)})
 
     async def list_devices(self, request: Request) -> JSONResponse:
         if not _check_token(request):
             return _unauthorized()
         return JSONResponse(
-            {
-                "ok": True,
-                "devices": [self.registry.to_public(r) for r in self.registry.list_all()],
-            }
+            {"ok": True, "devices": [self.registry.to_public(r) for r in self.registry.list_all()]}
         )
 
     async def delete_device(self, request: Request) -> JSONResponse:
@@ -139,17 +83,43 @@ class RegisterApi:
         ok = self.registry.remove(device_id)
         return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
 
-    async def refresh_device(self, request: Request) -> JSONResponse:
+    async def push_mqtt(self, request: Request) -> JSONResponse:
+        """Force-push current broker+creds to devices after user changed MQTT options.
+
+        POST /api/mqtt/push
+        body optional: {"force": true, "id": "f20e08"}  # id → one device; omit → all
+        """
         if not _check_token(request):
             return _unauthorized()
-        device_id = (request.path_params.get("id") or "").strip()
-        rec = self.registry.get(device_id)
-        if not rec:
-            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        force = True
+        only_id = ""
         try:
-            tools, resources = await self.client.fetch_catalog(rec.mcp_url)
-            self.registry.set_catalog(rec.id, tools=tools, resources=resources)
-            return JSONResponse({"ok": True, "device": self.registry.to_public(rec)})
-        except Exception as e:
-            self.registry.mark_error(rec.id, str(e))
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+            body = await request.json()
+            if isinstance(body, dict):
+                if "force" in body:
+                    force = bool(body.get("force"))
+                only_id = str(body.get("id") or body.get("device_id") or "").strip().lower()
+        except Exception:
+            pass
+
+        recs = self.registry.list_all()
+        if only_id:
+            recs = [r for r in recs if r.id == only_id]
+            if not recs:
+                return JSONResponse({"ok": False, "error": "device not found"}, status_code=404)
+
+        ips = [(r.coap_host or "").strip() for r in recs if (r.coap_host or "").strip()]
+        results = await push_all(ips, force=force)
+        ok_n = sum(1 for v in results.values() if v)
+        log.info("mqtt push api force=%s ok=%s/%s uri=%s", force, ok_n, len(results), broker_uri_for_device())
+        return JSONResponse(
+            {
+                "ok": ok_n == len(results) and len(results) > 0,
+                "broker": broker_uri_for_device(),
+                "user": (config.MQTT_USER or "").strip() or None,
+                "fingerprint": config_fingerprint().split("\n")[0],
+                "pushed": results,
+                "ok_count": ok_n,
+                "total": len(results),
+            }
+        )

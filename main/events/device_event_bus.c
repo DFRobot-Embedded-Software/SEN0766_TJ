@@ -1,6 +1,6 @@
 /**
  * @file device_event_bus.c
- * @brief 统一设备事件环形日志与订阅
+ * @brief emit 写环形日志后调用 mqtt_hub_publish_event。载荷字段见 device_event_bus.h。
  */
 
 #include "device_event_bus.h"
@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "mqtt_hub.h"
 #include "radar_area.h"
 #include "sdkconfig.h"
 
@@ -183,6 +184,8 @@ esp_err_t device_event_emit(const device_event_t *ev)
     strncpy(slot->type, ev->type, sizeof(slot->type) - 1);
     slot->type[sizeof(slot->type) - 1] = '\0';
     memcpy(slot->json, payload, payload_len + 1U);
+    char mqtt_copy[EVENT_JSON_MAX];
+    memcpy(mqtt_copy, payload, payload_len + 1U);
     s_next = (uint8_t)((s_next + 1U) % CONFIG_DEVICE_EVENT_LOG_SIZE);
     if (s_count < CONFIG_DEVICE_EVENT_LOG_SIZE) {
         s_count++;
@@ -200,6 +203,8 @@ esp_err_t device_event_emit(const device_event_t *ev)
             subs_copy[i].fn(ev->type, ev->area_id, subs_copy[i].ctx);
         }
     }
+
+    mqtt_hub_publish_event(mqtt_copy); /* 与本地 json 同一份；未连 broker 则丢弃 */
 
     ESP_LOGI(TAG, "emit %s/%s area=%u", category, ev->type, (unsigned)ev->area_id);
     return ESP_OK;
@@ -311,7 +316,7 @@ static void add_events_summary(cJSON *root, cJSON *events)
     }
     summary[0] = '\0';
 
-    /* 摘要只取最近几条，避免超长字符串拖慢 MCP 响应 */
+    /* 摘要只取最近几条，避免超长字符串拖慢 CoAP GET /sensors/events */
     const int start = (n > 8) ? (n - 8) : 0;
     for (int i = start; i < n; i++) {
         const cJSON *item = cJSON_GetArrayItem(events, i);
@@ -556,7 +561,7 @@ esp_err_t device_event_read_latest_mmwave(char **out_json)
     const cJSON *ts = cJSON_GetObjectItem(src, "timestamp");
     const cJSON *area_id = cJSON_GetObjectItem(src, "area_id");
     const cJSON *person_id = cJSON_GetObjectItem(src, "person_id");
-    /* 与 recent_events 条目字段对齐，避免 UI/MCP 读到另一套键名 */
+    /* 与 get_recent_events / MQTT event 字段对齐，避免 UI 读到另一套键名 */
     cJSON_AddStringToObject(out, "type", cJSON_IsString(type) ? type->valuestring : "");
     cJSON_AddStringToObject(out, "category", DEVICE_EVENT_CAT_MMWAVE);
     cJSON_AddStringToObject(out, "area", cJSON_IsString(area) ? area->valuestring : "毫米波");
