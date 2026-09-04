@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "c4004_sensor.h"
+#include "capture_session.h"
 #include "device_event_bus.h"
 #include "device_event_types.h"
 #include "device_id.h"
@@ -1221,6 +1222,129 @@ static esp_err_t identify_page_handler(httpd_req_t *req)
     return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
 }
 
+static esp_err_t api_capture_get_handler(httpd_req_t *req)
+{
+    cJSON *root = capture_session_status_json();
+    if (root == NULL) {
+        return send_json_error(req, "500 Internal Server Error", "status failed");
+    }
+    esp_err_t err = send_json(req, root);
+    cJSON_Delete(root);
+    return err;
+}
+
+static esp_err_t api_capture_start_handler(httpd_req_t *req)
+{
+    if (!capture_session_time_ok()) {
+        return send_json_error(req, "409 Conflict", "time not synced");
+    }
+    if (capture_session_is_active()) {
+        return send_json_error(req, "409 Conflict", "already recording");
+    }
+    esp_err_t err = capture_session_start();
+    if (err != ESP_OK) {
+        return send_json_error(req, "500 Internal Server Error", esp_err_to_name(err));
+    }
+    cJSON *root = capture_session_status_json();
+    if (root == NULL) {
+        return send_json_error(req, "500 Internal Server Error", "status failed");
+    }
+    err = send_json(req, root);
+    cJSON_Delete(root);
+    return err;
+}
+
+static esp_err_t api_capture_stop_handler(httpd_req_t *req)
+{
+    capture_session_stop();
+    cJSON *root = capture_session_status_json();
+    if (root == NULL) {
+        return send_json_error(req, "500 Internal Server Error", "status failed");
+    }
+    esp_err_t err = send_json(req, root);
+    cJSON_Delete(root);
+    return err;
+}
+
+static esp_err_t api_capture_room_handler(httpd_req_t *req)
+{
+    char body[128];
+    if (read_request_body(req, body, sizeof(body)) <= 0) {
+        return send_json_error(req, "400 Bad Request", "empty body");
+    }
+    cJSON *json = cJSON_Parse(body);
+    if (json == NULL) {
+        return send_json_error(req, "400 Bad Request", "invalid json");
+    }
+    const cJSON *room = cJSON_GetObjectItem(json, "room");
+    esp_err_t err = ESP_OK;
+    if (cJSON_IsString(room) && room->valuestring != NULL) {
+        err = capture_session_set_room(room->valuestring);
+    }
+    cJSON_Delete(json);
+    if (err != ESP_OK) {
+        return send_json_error(req, "500 Internal Server Error", "room save failed");
+    }
+    cJSON *root = capture_session_status_json();
+    if (root == NULL) {
+        return send_json_error(req, "500 Internal Server Error", "status failed");
+    }
+    err = send_json(req, root);
+    cJSON_Delete(root);
+    return err;
+}
+
+static esp_err_t api_capture_sample_handler(httpd_req_t *req)
+{
+    if (!capture_session_is_active()) {
+        return send_json_error(req, "409 Conflict", "not recording");
+    }
+    cJSON *root = capture_session_sample_json();
+    if (root == NULL) {
+        return send_json_error(req, "409 Conflict", "not recording");
+    }
+    esp_err_t err = send_json(req, root);
+    cJSON_Delete(root);
+    return err;
+}
+
+static esp_err_t api_capture_pcm_handler(httpd_req_t *req)
+{
+    if (!capture_session_is_active()) {
+        return send_json_error(req, "409 Conflict", "not recording");
+    }
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+
+    uint8_t chunk[2048];
+    while (true) {
+        int n = capture_session_read_pcm(chunk, sizeof(chunk), 250);
+        if (n > 0) {
+            if (httpd_resp_send_chunk(req, (const char *)chunk, n) != ESP_OK) {
+                capture_session_abort();
+                return ESP_FAIL;
+            }
+            continue;
+        }
+        if (n == 0) {
+            break;
+        }
+        if (!capture_session_is_active()) {
+            n = capture_session_read_pcm(chunk, sizeof(chunk), 50);
+            while (n > 0) {
+                if (httpd_resp_send_chunk(req, (const char *)chunk, n) != ESP_OK) {
+                    capture_session_abort();
+                    return ESP_FAIL;
+                }
+                n = capture_session_read_pcm(chunk, sizeof(chunk), 50);
+            }
+            break;
+        }
+    }
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
 static void register_api_handlers(void)
 {
     httpd_uri_t data = {.uri = "/api/data", .method = HTTP_GET, .handler = api_data_handler};
@@ -1239,6 +1363,12 @@ static void register_api_handlers(void)
     httpd_uri_t logs_get = {.uri = "/api/logs", .method = HTTP_GET, .handler = api_logs_get_handler};
     httpd_uri_t logs_post = {.uri = "/api/logs", .method = HTTP_POST, .handler = api_logs_post_handler};
     httpd_uri_t identify = {.uri = "/identify", .method = HTTP_GET, .handler = identify_page_handler};
+    httpd_uri_t cap_get = {.uri = "/api/capture", .method = HTTP_GET, .handler = api_capture_get_handler};
+    httpd_uri_t cap_start = {.uri = "/api/capture/start", .method = HTTP_POST, .handler = api_capture_start_handler};
+    httpd_uri_t cap_stop = {.uri = "/api/capture/stop", .method = HTTP_POST, .handler = api_capture_stop_handler};
+    httpd_uri_t cap_room = {.uri = "/api/capture/room", .method = HTTP_POST, .handler = api_capture_room_handler};
+    httpd_uri_t cap_sample = {.uri = "/api/capture/sample", .method = HTTP_GET, .handler = api_capture_sample_handler};
+    httpd_uri_t cap_pcm = {.uri = "/api/capture/pcm", .method = HTTP_GET, .handler = api_capture_pcm_handler};
 
     httpd_register_uri_handler(s_server, &data);
     httpd_register_uri_handler(s_server, &mmwave);
@@ -1256,6 +1386,12 @@ static void register_api_handlers(void)
     httpd_register_uri_handler(s_server, &logs_get);
     httpd_register_uri_handler(s_server, &logs_post);
     httpd_register_uri_handler(s_server, &identify);
+    httpd_register_uri_handler(s_server, &cap_get);
+    httpd_register_uri_handler(s_server, &cap_start);
+    httpd_register_uri_handler(s_server, &cap_stop);
+    httpd_register_uri_handler(s_server, &cap_room);
+    httpd_register_uri_handler(s_server, &cap_sample);
+    httpd_register_uri_handler(s_server, &cap_pcm);
 }
 
 static esp_err_t start_server(const char *index_page, bool provision_mode)
@@ -1276,7 +1412,9 @@ static esp_err_t start_server(const char *index_page, bool provision_mode)
     config.stack_size = 10240;
     /* OTA 固件上传可能较慢（尤其 SoftAP），拉长收发等待避免中途超时 */
     config.recv_wait_timeout = 120;
-    config.send_wait_timeout = 120;
+    /* Capture PCM can stream up to 5 minutes */
+    config.send_wait_timeout = 360;
+    config.max_open_sockets = 10;
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.lru_purge_enable = true;
 

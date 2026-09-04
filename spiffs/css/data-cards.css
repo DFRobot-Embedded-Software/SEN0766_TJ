@@ -1,8 +1,13 @@
 /* 设备数据页视觉规范：字号、间距、状态与响应式布局 */
 #page-data { max-width: 1400px; margin: 0 auto; }
-#page-data .title { min-height: 78px; padding: 18px 22px; }
+#page-data .title { min-height: 78px; padding: 18px 22px; flex-wrap: wrap; gap: 10px; }
 #page-data .title h2 { margin-bottom: 6px; font-size: 21px; line-height: 1.25; }
 #page-data .title p { font-size: 12px; line-height: 1.5; }
+.capture-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; width: 100%; }
+.capture-bar label { display: flex; align-items: center; gap: 8px; color: #475467; font-size: 12px; font-weight: 600; }
+.capture-bar input { height: 34px; width: 200px; border: 1px solid #e1e7f0; border-radius: 6px; padding: 0 10px; background: #fff; }
+#captureMeta { color: #8b94a3; font-size: 12px; }
+#captureBtn.recording { background: #d64545 !important; border-color: #d64545 !important; }
 #page-data .data-layout { display: grid; grid-template-columns: minmax(380px,410px) minmax(0,1fr); align-items: stretch; gap: 14px; }
 .modules { display: none !important; }
 #page-data .env,

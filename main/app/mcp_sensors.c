@@ -12,6 +12,7 @@ static const char *TAG = "mcp_sensors";
 #if !CONFIG_YAMNET_VERIFY_ONLY
 #include "esp_sntp.h"
 #include "board_snapshot.h"
+#include "capture_session.h"
 #include "comm_hub.h"
 #include "device_id.h"
 #include "identify_btn.h"
@@ -279,6 +280,7 @@ void app_main(void)
     boot_ui();
     
     boot_sensors();
+    capture_session_init();
 
     err = boot_storage();
     if (err != ESP_OK) {
